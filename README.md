@@ -4,4 +4,5 @@ Because the PsySummary executable is too large to host here, you can download it
 
 Or just click the links below:
 
-[PsySummary Mac OS Silicon](http://yzhangpsy.myds.me:8000/dist/PsySummary20250423210004MacSilicon.dmg)  
+[PsySummary for Mac OS Silicon](http://yzhangpsy.myds.me:8000)
+[PsySummary for Windows](http://yzhangpsy.myds.me:8000/dist/PsySummary20250424011013Win.zip)
