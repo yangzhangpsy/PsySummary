@@ -1,4 +1,4 @@
-All materials—including the PsySummary software, its documentation, and the validation datasets—are available here.
+All materials—including the PsySummary software, its documentation, and the validation datasets—are available here soon.
 
 Because the PsySummary executable is too large to host here, you can download it freely from our website: https://www.psybuilder.com.
 
