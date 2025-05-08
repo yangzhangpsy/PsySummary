@@ -7,3 +7,11 @@ Or just click the links below:
 [PsySummary for Mac OS Silicon](http://yzhangpsy.myds.me:8000/dist/PsySummary20250424103352MacSilicon.dmg)
 
 [PsySummary for Windows](http://yzhangpsy.myds.me:8000/dist/PsySummary20250508114254Win.zip)
+
+
+
+Folder Structure:
+
+PsyData:         the PsySummary source code
+dataValidation:  the validation datasets
+
