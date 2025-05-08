@@ -50,19 +50,19 @@ def parseStringToList(string):
     start_index = string.find(": ")
 
     if start_index != -1:
-        list_string = string[start_index + 2:]  # 提取包含列表的部分
-        # 使用 eval() 函数解析字符串并转换为列表
+        list_string = string[start_index + 2:]
+
         filter_list = eval(list_string)
-        # 输出转换后的列表
+
         return filter_list
     else:
         return None
 
 
 def fixColumnName(name, shouldStartWithLetter: bool = False):
-    # 去掉不符合规则的字符，仅保留合法字符
+
     fixed_name = ''.join(re.findall(r'[a-zA-Z0-9_\-.]', name))
-    # 确保列名以字母开头
+
     if shouldStartWithLetter:
         if not fixed_name or not re.match(r'^[a-zA-Z]', fixed_name):
             fixed_name = 'col' + fixed_name  # 添加前缀以满足规则
