@@ -1,0 +1,4 @@
+rowList: []
+columnList: []
+dataList: ['target.rt@Mean']
+filterList: ['target.rt:Pooling CDF']
