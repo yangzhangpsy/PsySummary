@@ -1,17 +1,20 @@
-All materials—including the PsySummary software, the source code, its documentation, and the validation datasets—will be available here soon.
+All materials—including the PsySummary application, its source code, documentation, and validation datasets—will be available here shortly.
 
-Because the PsySummary executable is too large to host here, you can download it freely from our website: https://www.psybuilder.com.
+Download options
 
-Or just click the links below:
+From our website
+https://www.psybuilder.com
+• Run PsySummary inside PsyBuilder (Toolbox → PsySummary), or
+• Download and install it as a standalone program.
 
-[PsySummary for Mac OS Silicon](http://yzhangpsy.myds.me:8000/dist/PsySummary20250424103352MacSilicon.dmg)
+Direct installers (available on this page)
+• Windows: PsySummary--Win.zip
+• macOS (Apple Silicon): PsySummary--MacSilicon.dmg
+. Linux: come soon...
 
-[PsySummary for Windows](http://yzhangpsy.myds.me:8000/dist/PsySummary20250508114254Win.zip)
+Folder structure
 
+• PsyData/   PsySummary source code
 
-
-Folder Structure:
-
-PsyData:         the PsySummary source code
-dataValidation:  the validation datasets
+• dataValidation/ Validation datasets
 
