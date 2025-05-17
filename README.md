@@ -9,7 +9,7 @@ https://www.psybuilder.com
 
 • Download and install it as a standalone program.
 
-**Direct installers (available on this page)**
+_**Direct installers (available on this page)**_
 
 • Windows: PsySummary--Win.zip
 
@@ -17,7 +17,7 @@ https://www.psybuilder.com
 
 • Linux: come soon...
 
-Folder structure
+_**Folder structure**_
 
 • PsyData/   PsySummary source code
 
