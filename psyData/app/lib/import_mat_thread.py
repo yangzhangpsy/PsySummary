@@ -17,6 +17,8 @@ def flattenValue(value):
             return value[0]
         if isinstance(value[0], str):
             return value[0]
+        if len(value[0]) > 1:
+            return ','.join(map(str, value[0]))
         return value[0][0]  # 直接返回该值
 
 
