@@ -47,7 +47,7 @@ def getStandardError(x):
 
 
 def getValueInExpression(expression: str):
-    numbers_str_list = re.findall(r"-?\d+\.\d+?|-?\d+", expression)
+    numbers_str_list = re.findall(r"-?\d+\.\d+|-?\d+", expression)
 
     nz = int(numbers_str_list[0]) if '.' not in numbers_str_list[0] else float(numbers_str_list[0])
     return nz

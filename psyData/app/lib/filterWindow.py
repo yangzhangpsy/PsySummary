@@ -113,7 +113,7 @@ class FilterWindow(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.resize(300, 700)
 
-        self.floatIntReg = r"-?\d+\.\d+?|-?\d+"
+        self.floatIntReg = r"-?\d+\.\d+|-?\d+"
         self.isValue2Disabled = False
         self.isValue1Disabled = False
 
