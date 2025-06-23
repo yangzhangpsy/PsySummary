@@ -1,2 +1,4 @@
 PsySummary20250508114254Win.zip filter=lfs diff=lfs merge=lfs -text
 PsySummary20250424103352MacSilicon.dmg filter=lfs diff=lfs merge=lfs -text
+*Win.zip filter=lfs diff=lfs merge=lfs -text
+*.dmg filter=lfs diff=lfs merge=lfs -text
