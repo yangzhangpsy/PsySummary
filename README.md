@@ -5,7 +5,7 @@ All materials—including the PsySummary application, its source code, documenta
 From our website
 https://www.psybuilder.com
 
-• Run PsySummary inside PsyBuilder (Toolbox → PsySummary), or
+• Run PsySummary inside PsyBuilder (Toolboxes → Results Data Aggregation), or
 
 • Download and install it as a standalone program.
 
