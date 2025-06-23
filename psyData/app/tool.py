@@ -120,7 +120,7 @@ def validate_inputs(row_var_list, column_var_list, sumTable, dataFrame):
 
 
 def getValueInExpression(expression: str):
-    numbers_str_list = re.findall(r"-?\d+(\.\d+)?", expression)
+    numbers_str_list = re.findall(r"-?\d+\.\d+?|-?\d+", expression)
     if not numbers_str_list:
         raise ValueError("No number found in expression.")
 
