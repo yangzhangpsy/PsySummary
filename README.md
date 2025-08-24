@@ -157,7 +157,9 @@ To ensure consistency across analyses:
 Step 3.1 Saving Results
 After configuring your analysis and outlier exclusion procedures:
 1.	Click Run to process the data and generate the summary table
+
  ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f17.png)
+
 2.	If you selected the Pooling CDF option in the previous steps, after clicking Run you’ll be presented with a visualization window showing: a histogram of your RT data distribution; an overlay of the fitted mixture density model; and a visual indication of potential outliers in the tails.
 
 At this point, you need to make an informed decision about how to proceed:
