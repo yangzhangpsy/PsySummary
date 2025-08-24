@@ -56,6 +56,7 @@ Step 1.1 Loading Data Files
 PsySummary accepts multiple common data formats including .mat, .txt, .dat, and its native .psydata format. To load your data:
 1.	Select File → Load Data from the menu bar in the Data Summary window
 2.	Navigate to your data file location, select the file, and click Open
+
  ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f1.png)
 
 3.	To view the imported data matrix, select File → View Data
