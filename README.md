@@ -1,4 +1,4 @@
-All materials—including the PsySummary application, its source code, documentation, and validation datasets—will be available here shortly.
+All materials—including the PsySummary application, its source code, documentation, and validation datasets—are available here.
 
 **Download options**
 
@@ -26,7 +26,7 @@ _**Folder structure**_
 
 
 
-# PsySummary: An Open-Source GUI for Robust and Transparent Reaction Time Outlier Exclusion with Methodological Framework and Decision Tree Guidelines
+# Reaction time outlier handling in behavioral research. Part II: PsySummary software, validation, and tutorial
 
 <p align="center"> Zhicheng Lin<sup>1,2</sup>, lian-zi Xing<sup>1</sup>, Xin Chen<sup>1</sup>, Yue-Jie Chen<sup>1</sup>, Yang Zhang<sup>1</sup> </p>
 
