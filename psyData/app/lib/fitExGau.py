@@ -111,7 +111,7 @@ def CDFpooling_main(rt_df, sub_vars_list, cond_vars_list, rt_var_name,
     unique_combinations = rt_df.loc[:, group_keys].drop_duplicates()
 
     for _, combo in unique_combinations.iterrows():
-        # 构建行筛选条件
+        # Build row filtering conditions
         condition = np.ones(len(rt_df), dtype=bool)
         for col in group_keys:
             condition &= (rt_df[col] == combo[col])
@@ -175,7 +175,7 @@ def CDFpooling_main_old(rt_df, min_trials_required=50, start_prop_var_in_tau=[0.
 
 
 def generate_ex_gaussian_data(n=100, mu=100, sigma=100, nu=25):
-    """生成ex-gaussian分布的随机数据"""
+    """Generate random data from an ex-Gaussian distribution"""
     gaussian_part = np.random.normal(mu, sigma, n)
     exponential_part = np.random.exponential(nu, n)
     return gaussian_part + exponential_part
@@ -218,14 +218,14 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle('Matplotlib in PyQt5 Example')
 
-        # 创建一个MplCanvas实例
+        # Create an MplCanvas instance
         self.canvas = MplCanvas()
 
-        # 设置布局
+        # Set the layout
         layout = QVBoxLayout()
         layout.addWidget(self.canvas)
 
-        # 创建中心窗口小部件
+        # Create the central widget
         central_widget = QWidget(self)
         central_widget.setLayout(layout)
         self.setCentralWidget(central_widget)
@@ -238,7 +238,7 @@ class MplCanvas(FigureCanvas):
         self.plot()
 
     def plot(self):
-        # 这里可以放置你需要绘制的图形
+        # Place the plot you need to draw here
         self.ax.plot([0, 1, 2, 3], [10, 20, 25, 30], label='Sample Line')
         self.ax.set_title('Sample Matplotlib Plot')
         self.ax.set_xlabel('X-axis')

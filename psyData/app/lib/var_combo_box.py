@@ -57,7 +57,7 @@ class VarComboBox(QComboBox):
             self.addItem(text)
         self.setCurrentText(text)
 
-    # 检查变量
+    # Check variables
     def searchVariable(self, current_text: str):
         if current_text.startswith("[") and current_text.endswith("]"):
             self.setStyleSheet("color: blue")

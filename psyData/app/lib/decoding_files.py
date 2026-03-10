@@ -20,7 +20,7 @@ class DecodingFiles(Dialog):
         self.files = files
         self.data = pd.DataFrame()
 
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)  # 去除问号按钮
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)  # Remove the help button
         self.setWindowModality(Qt.WindowModal)
         # self.setWindowIcon(Func.getImageObject("common/icon.png", type=1))
 
@@ -137,13 +137,13 @@ class DecodingFiles(Dialog):
         text_format = self.text_format_comboBox.currentText()
         delimiter = self.delimiter_comboBox.currentText()
 
-        specialCharDict = {"WhiteSpace": "\s",
-                           '.': '\.',
-                           "$": "\$",
-                           "^": "\^",
-                           "*": "\*",
-                           "+": "\+",
-                           "|": "\|"}
+        specialCharDict = {"WhiteSpace": r"\s",
+                           '.': r'\.',
+                           "$": r"\$",
+                           "^": r"\^",
+                           "*": r"\*",
+                           "+": r"\+",
+                           "|": r"\|"}
 
         if delimiter in specialCharDict:
             delimiter = specialCharDict[delimiter]
@@ -168,8 +168,8 @@ class DecodingFiles(Dialog):
                     max_rows = min(10, len(lines))
 
                 if self.contains_header_check.isChecked():
-                    variable_names = re.split(splitCode, lines[0].strip())  # 第一行为变量名
-                    data = [re.split(splitCode, line.strip()) for line in lines[1:max_rows]]  # 以分隔符分隔的变量值
+                    variable_names = re.split(splitCode, lines[0].strip())  # First row contains variable names
+                    data = [re.split(splitCode, line.strip()) for line in lines[1:max_rows]]  # Split variable values by delimiter
                 else:
                     data = [re.split(splitCode, line.strip()) for line in lines[0:max_rows]]
                     variable_names = [f"Column{i + 1}" for i in range(len(data[0]))]
@@ -192,7 +192,7 @@ class DecodingFiles(Dialog):
         finally:
             return df
 
-    # 读取多个文件
+    # Read multiple files
     def readMultipleFiles(self, fileList, readAllRows=False, addFilenameVariable=False):
         all_dfs = []
         try:

@@ -174,7 +174,7 @@ def doFilterOutData(row_var_list: list, column_var_list: list, expression: str, 
                 sd = sumTable2DataFrame(row_var_list, column_var_list, median_table2, dataFrame)
                 sd *= 1.4826
                 # remove the temp_var (abs(x - median(x)))
-                dataFrame.drop(columns=[temp_var_name])
+                dataFrame.drop(columns=[temp_var_name], inplace=True)
 
             else:
                 mean = sumTable2DataFrame(row_var_list, column_var_list, mean_table, dataFrame)
@@ -269,7 +269,7 @@ class StatisticTool:
             z_score = 1
         return z_score
 
-    # 转换规则
+    # Convert rules
 
     @staticmethod
     def filterData(row_var_list, column_var_list, dataFrame, ruleList):
@@ -286,12 +286,12 @@ class StatisticTool:
             if 'Pooling CDF' != conditional_expression:
                 be_printed_omega_str += '-1, '
 
-            # 区分range规则和checklist规则
+            # Distinguish range rules from checklist rules
             if isCompareCond(conditional_expression):
                 if not pd.api.types.is_numeric_dtype(tmp_data_frame[variable_name]):
                     tmp_data_frame[variable_name] = pd.to_numeric(tmp_data_frame[variable_name], errors='coerce')
 
-                # range规则
+                # Range rule
                 if 'and' in conditional_expression:
                     expression_1, expression_2 = conditional_expression.split('and')
 

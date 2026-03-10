@@ -20,8 +20,8 @@ class DraggableListWidget(ListWidget):
         self.setAcceptDrops(True)
         self.setDragEnabled(True)
 
-        self.setSelectionMode(QAbstractItemView.SingleSelection)  # 单选模式
-        # self.setSelectionMode(QAbstractItemView.ExtendedSelection)  # 多选模式
+        self.setSelectionMode(QAbstractItemView.SingleSelection)  # Single-selection mode
+        # self.setSelectionMode(QAbstractItemView.ExtendedSelection)  # Multi-selection mode
 
         if self.list_type == self.VariableType:
             self.setDragDropOverwriteMode(False)
@@ -115,41 +115,41 @@ class DraggableListWidget(ListWidget):
                    'Shifted Inv-Gaussian (μ, λ, shift)',
                    ]
             currentText = item.text().split("@")[1]
-            # 把currentText交换道lst的第一个
+            # Put the current operation first
             lst.remove(currentText)
             lst.insert(0, currentText)
             self.combo_box.addItems(lst)
 
             self.itemLabel = item
-            # 创建水平布局
+            # Wrap the editor in a lightweight container
             h_layout = QHBoxLayout()
 
-            # 添加下拉框到水平布局
+            # Add the editor to the container layout
             h_layout.addWidget(self.combo_box)
 
-            # 创建项小部件并设置布局
+            # Create the inline editor widget
             item_widget = QWidget()
             item_widget.setLayout(h_layout)
 
-            # 设置项小部件的拉伸因子以填充整个项的高度
+            # Remove margins so the editor fills the item area
             h_layout.setContentsMargins(0, 0, 0, 0)
             h_layout.setStretch(0, 1)
 
-            # 将项小部件设置为当前项的小部件
+            # Replace the clicked item with the inline editor
             listWidgetItem = self.item(self.row(item))
             self.setItemWidget(listWidgetItem, item_widget)
 
             combo_box_width = item_widget.sizeHint().width() * 0.88
             self.combo_box.setMaximumWidth(int(combo_box_width))
 
-            # 当下拉框的选择发生变化时，触发删除下拉框的槽函数
+            # Commit the new operation when the selection changes
             self.combo_box.activated[str].connect(self.confirmBox)
         except:
             pass
 
     def confirmBox(self, text):
         try:
-            self.combo_box.deleteLater()  # 删除下拉框
+            self.combo_box.deleteLater()  # Remove the inline editor
             prev_text = self.itemLabel.text()
             new_text = prev_text.split("@")[0] + "@" + text
             self.itemLabel.setText(new_text)
@@ -187,11 +187,11 @@ class VariableDraggableListWidget(ListWidget):
         self.setAcceptDrops(True)
         # self.setContextMenuPolicy(Qt.CustomContextMenu)
 
-        self.setDragEnabled(True)  # 开启拖拽功能
-        # self.setDragDropOverwriteMode(False)  # 不能拖入
+        self.setDragEnabled(True)  # Allow dragging items out of the list
+        # self.setDragDropOverwriteMode(False)  # Prevent dropping back into this widget
         self.setDropIndicatorShown(False)
         self.setSortingEnabled(True)
-        self.setSelectionMode(QAbstractItemView.ExtendedSelection)  # 多选模式
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)  # Multi-selection mode
 
         # self.customContextMenuRequested.connect(self.show_context_menu)
 
@@ -206,7 +206,7 @@ class VariableDraggableListWidget(ListWidget):
 
 # for filter list
 class FilterDragListWidget(ListWidget):
-    # 自定义信号
+    # Signal emitted after the filter order changes
     # listChanged: pyqtSignal = pyqtSignal(str)
 
     def __init__(self, contextMenuType: int = 1):
@@ -216,11 +216,11 @@ class FilterDragListWidget(ListWidget):
         self.setDragDropMode(QListWidget.InternalMove)
         self.setSelectionMode(QListWidget.MultiSelection)
 
-    # 判断拖动后是否完成交换位置，以便及时同步
+    # Emit a change notification only when the order actually changes
     def dropEvent(self, event):
-        old_row = self.currentRow()  # 保存拖动前的位置
+        old_row = self.currentRow()  # Record the current row before the move
         super().dropEvent(event)
-        new_row = self.currentRow()  # 获取拖动后的位置
+        new_row = self.currentRow()  # Read the current row after the move
         if old_row != new_row:
             self.listChanged.emit("change")
 

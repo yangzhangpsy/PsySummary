@@ -4,6 +4,8 @@ from PyQt5.QtWidgets import QWidget, QCheckBox, QListWidgetItem, QMessageBox, QL
     QFrame, QTextEdit, QPushButton, QGridLayout, QGroupBox, QVBoxLayout, QHBoxLayout, \
     QApplication, QListView, QStyledItemDelegate, QStyleOptionButton, QStyle, QSizePolicy
 
+import pandas as pd
+
 from app.lib.draggablelistwidget import FilterDragListWidget
 from app.psyDataFunc import PsyDataFunc
 
@@ -366,14 +368,14 @@ in the view/analysis/summary procedure.""")
 
         self.add_btn.clicked.connect(self.addEvent)
 
-        # 初始化 filter
+        # Load existing filters
         self.initFilterList()
 
         self.selected_var_name = self.data.columns[0]
         self.checklist_page_var_info.setText("Variable name: " + self.selected_var_name)
         self.range_page_var_info.setText("Variable name: " + self.selected_var_name)
         self.cdf_pooling_var_info.setText("Variable name: " + self.selected_var_name)
-        # 下拉框添加数据
+        # Populate the selector
         max_len, t_len = 0, 0
         pt_val = self.befiltered_var_box.font().pointSize()
 
@@ -386,8 +388,8 @@ in the view/analysis/summary procedure.""")
 
         self.befiltered_var_box.view().setMinimumWidth(max_len * pt_val)
 
-        # initial the checklist with the first variable
-        # default to show the first variable in the list
+        # Initialize the checklist
+        # Default to the first variable
         self.updateModelData(self.data.columns[0])
 
     def initFilterList(self):
@@ -485,8 +487,24 @@ in the view/analysis/summary procedure.""")
         # Get unique values from the selected column
         self.updateModelData(selected_var_name)
 
+    def isNumericVariable(self, variableName: str) -> bool:
+        variable_data = self.data[variableName]
+        if pd.api.types.is_numeric_dtype(variable_data):
+            return True
+
+        non_null_values = variable_data.dropna()
+        if non_null_values.empty:
+            return False
+
+        non_empty_values = non_null_values[non_null_values.astype(str).str.strip() != '']
+        if non_empty_values.empty:
+            return False
+
+        numeric_values = pd.to_numeric(non_empty_values, errors='coerce')
+        return numeric_values.notna().all()
+
     def updateModelData(self, variableName: str):
-        self.isVariableNumeric = not isinstance(self.data[variableName].iloc[0], str)
+        self.isVariableNumeric = self.isNumericVariable(variableName)
         unique_values = self.data[variableName].dropna().unique()
 
         # Prepare data for the model: [(value, False), ...]
@@ -496,21 +514,21 @@ in the view/analysis/summary procedure.""")
         self.model._data = data
         self.model.endResetModel()
 
-    # 添加多选框
+    # Legacy checklist path
     def insertOld(self):
         self.check_list.clear()
-        # only check the first value
-        self.isVariableNumeric = not isinstance(self.data[self.selected_var_name].iloc[0], str)
+        # Recompute the variable type for the current selection
+        self.isVariableNumeric = self.isNumericVariable(self.selected_var_name)
 
         # Filter out null values and get unique non-null values
         non_null_values = self.data[self.selected_var_name].dropna().unique().tolist()
         QApplication.processEvents()
 
-        # in case all values are empty
+        # Skip rendering if every value is empty
         if any(non_null_values):
             for value in non_null_values:
                 box = QCheckBox(str(value))  # Create a QCheckBox
-                listItem = QListWidgetItem()  # 实例化一个Item，QListWidget，不能直接加入QCheckBox
+                listItem = QListWidgetItem()  # Create a QListWidgetItem because a QCheckBox cannot be added directly
                 self.check_list.addItem(listItem)  # Add QListWidgetItem to QListWidget
                 self.check_list.setItemWidget(listItem, box)  # Set QCheckBox as the widget for QListWidgetItem
 
@@ -518,7 +536,7 @@ in the view/analysis/summary procedure.""")
         # if not hasattr(self, 'check_list') or self.check_list is None:
         #     return []
 
-        count = self.check_list.count()  # 得到QListWidget的总个数
+        count = self.check_list.count()  # Get the total number of QListWidget items
         if count == 0:
             return []
 
@@ -544,19 +562,19 @@ in the view/analysis/summary procedure.""")
         else:
             self.addCdfPoolingEvent()
 
-    # cdfPooling event
+    # Add a Pooling CDF filter
     def addCdfPoolingEvent(self):
         text = self.selected_var_name
         text += ":Pooling CDF"
         self.filter_list.addItem(text)
         self.mainFilterList.addItem(text)
 
-    # checklist确认事件
+    # Add the selected checklist values
     def addCheckListEvent(self):
         chooses = self.getChoose()
         text = self.selected_var_name
         text += ":"
-        # 拼接所有多选框选中的值
+        # Serialize the selected values
         if self.isVariableNumeric:
             all_values_Str = "".join(f" = {v}" for v in chooses)
         else:
@@ -582,7 +600,7 @@ in the view/analysis/summary procedure.""")
     #             if checkbox_widget is not None:
     #                 checkbox_widget.setChecked(False)
 
-    # range 的 add 按钮按下事件
+    # Add a range filter
     def addRangeEvent(self):
         text = self.selected_var_name
         logical_operator_text = self.logical_operator_comboBox.currentText()
@@ -638,7 +656,7 @@ in the view/analysis/summary procedure.""")
         self.data_type_comboBox1.setCurrentIndex(0)
         self.data_type_comboBox2.setCurrentIndex(0)
 
-    # 清空
+    # Clear all filters
     def clearAll(self):
         self.filter_list.clear()
         self.mainFilterList.clear()
@@ -646,7 +664,7 @@ in the view/analysis/summary procedure.""")
     def onItemClicked(self, item):
         self.chooseItem = item
 
-    # 清除选中项
+    # Remove the selected filter
     def clearOne(self):
         if self.chooseItem is None:
             msg = QMessageBox(QMessageBox.Warning, "Warning", "Please select a filter item to clear.")
@@ -657,7 +675,7 @@ in the view/analysis/summary procedure.""")
             self.mainFilterList.takeItem(row)
             self.chooseItem = None
 
-    # 关闭窗口
+    # Close the dialog
     def closeWindow(self):
         self.close()
 

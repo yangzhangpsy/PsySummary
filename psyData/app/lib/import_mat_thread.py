@@ -8,9 +8,9 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 
 def flattenValue(value):
-    if isinstance(value, list) and len(value) > 0 and isinstance(value[0], list):  # 如果是列表（二维数组）
+    if isinstance(value, list) and len(value) > 0 and isinstance(value[0], list):  # Preserve nested lists from MATLAB cell arrays
         return value[0]
-    else:  # 如果是整数值或其他类型的值
+    else:  # Flatten scalar-like values
         if len(value) == 0:
             return None
         if len(value[0]) == 0:
@@ -19,7 +19,7 @@ def flattenValue(value):
             return value[0]
         if len(value[0]) > 1:
             return ','.join(map(str, value[0]))
-        return value[0][0]  # 直接返回该值
+        return value[0][0]  # Return the scalar value
 
 
 def flattenValueMat73(value):
@@ -97,9 +97,10 @@ class ImportMatThread(QThread):
                     variable = mat_data.get('allResults_APL', None)
                     if variable is None:
                         self.readStatus.emit(2, f"Failed to find 'allResults_APL' in {os.path.basename(file)} !")
+                        continue
 
-                    # Get column names from the first row: need to be confirmed
-                    # handle emtpy variable name in the first row
+                    # Read column names from the first row
+                    # Assign placeholder names to empty headers
                     columnList = []
                     untitled_num = 1
 
@@ -109,11 +110,11 @@ class ImportMatThread(QThread):
                                 columnList.append(row.flat[0])
                             else:
                                 cTitle = f'untitled{untitled_num}'
-                                untitled_num += 1
                                 while cTitle in columnList:
-                                    cTitle = f'untitled{untitled_num}'
                                     untitled_num += 1
-                                columnList.append(f'untitled{untitled_num}')
+                                    cTitle = f'untitled{untitled_num}'
+                                columnList.append(cTitle)
+                                untitled_num += 1
                     # columnList = [str(row.flat[0]) for line in variable[0] for row in line]
 
                     # Convert to DataFrame, skipping the first row which contains column names

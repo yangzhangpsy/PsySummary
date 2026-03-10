@@ -71,8 +71,8 @@ class PsyDataFunc(object):
                 return QIcon(QPixmap(path).scaled(size, transformMode=Qt.SmoothTransformation))
             return QIcon(path)
         elif type == 2:
+            movie = QMovie(path)
             if size:
-                return QMovie(path).setScaledSize(size)
-            return QMovie(path)
-
+                movie.setScaledSize(size)
+            return movie
 

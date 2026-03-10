@@ -117,7 +117,7 @@ class PivotedDataWidget(QWidget):
         self.fit_dist_thread = None
         self.table = None
         self.msg_box = None
-        self.asynchronous = False  # status of asynchronous of the fit thread
+        self.asynchronous = False  # Whether a background fitting task is still running
         self.resultList = []
         self.filterStr = ''
         self.ruleList = ruleList
@@ -142,6 +142,7 @@ class PivotedDataWidget(QWidget):
 
         self.fit_dist_thread.fitStatus.connect(handleFitThreadSignal)
         self.fit_dist_thread.finished.connect(self.handleFitFinished)
+        self.fit_dist_thread.fitFailed.connect(self.handleFitFailed)
 
         self.fit_dist_thread.start()
 
@@ -254,7 +255,7 @@ class PivotedDataWidget(QWidget):
                     self.asynchronous = True
                     self.fitDistInBackground(tmpDataFrame, operation, row_vars, col_vars, target_var_name, operation)
 
-                    # waiting until the fit thread is finished
+                    # Wait for the fit thread
                     self.process_with_async_wait()
 
                 """
@@ -263,9 +264,9 @@ class PivotedDataWidget(QWidget):
                 if operation not in self.fitMethods:
                     self.updateResultDataframe(result, target_var)
 
-                pd.set_option('display.float_format', lambda x: '%.10f' % x)
-                # generate analysis script
-                generateScript(row_vars, col_vars, target_vars, self.ruleList)
+            pd.set_option('display.float_format', lambda x: '%.10f' % x)
+            # Generate one script per summary
+            generateScript(row_vars, col_vars, target_vars, self.ruleList)
 
         except Exception as e:
             raise Exception(e)
@@ -278,39 +279,39 @@ class PivotedDataWidget(QWidget):
         self.timer.start(100)  # 100ms interval
 
     def process_with_async_wait(self):
-        # 创建一个事件循环
+        # Run a local event loop
         loop = QEventLoop()
 
-        # 创建定时器用于处理异步操作
+        # Poll while fitting
         timer = QTimer()
         last_print_time = time.time()
 
         def check_async_status():
             nonlocal last_print_time
 
-            # 检查是否还在异步状态
+            # Stop when fitting completes
             if not self.asynchronous:
-                # 停止定时器
+                # Stop polling
                 timer.stop()
-                # 退出事件循环
+                # Exit the loop
                 loop.quit()
                 return
 
-                # 处理事件
+                # Keep the UI responsive
             QApplication.processEvents()
 
-            # 周期性打印（如果需要）
+            # Optional fit heartbeat
             current_time = time.time()
             if current_time - last_print_time > 1:
                 last_print_time = current_time
                 # print('...')
-                # 可选：PsyDataFunc.printOut("Fitting ...", 0)
+                # Optional: PsyDataFunc.printOut("Fitting ...", 0)
 
-        # 设置定时器间隔和回调
-        timer.setInterval(100)  # 100ms 检查一次
+        # Configure polling
+        timer.setInterval(100)  # Poll every 100 ms
         timer.timeout.connect(check_async_status)
 
-        # 启动定时器和事件循环
+        # Poll until fitting finishes
         timer.start()
         loop.exec_()
 
@@ -322,12 +323,20 @@ class PivotedDataWidget(QWidget):
         self.setLayout(self.all_layout)
 
     def handleFitFinished(self, result, target_var, row_vars, col_vars):
-        result = groupby_to_pivot_tables(result, row_vars, col_vars)
-        self.updateResultDataframe(result, target_var)
+        if result is not None:
+            result = groupby_to_pivot_tables(result, row_vars, col_vars)
+            self.updateResultDataframe(result, target_var)
 
+        self.finishFitThread()
+
+    def handleFitFailed(self):
+        self.finishFitThread()
+
+    def finishFitThread(self):
         self.asynchronous = False
-        self.fit_dist_thread.quit()
-        self.fit_dist_thread.wait()
+        if self.fit_dist_thread is not None:
+            self.fit_dist_thread.wait()
+            self.fit_dist_thread = None
 
     def updateResultDataframe(self, result, target_var):
         if isinstance(target_var, list):
@@ -345,7 +354,7 @@ class PivotedDataWidget(QWidget):
 
         self.table.updateTable(decimal_places)
 
-    # 获取数据
+    # Collect table data as tab-delimited text
 
     def getTextData(self):
         data = self.filterStr + '\n' + '\n'
@@ -359,7 +368,7 @@ class PivotedDataWidget(QWidget):
             data += '\n'
         return data
 
-    # 导出数据
+    # Export the table data
     def exportData(self):
         data = self.getTextData()
         try:
@@ -370,7 +379,7 @@ class PivotedDataWidget(QWidget):
         except Exception as e:
             print(e)
 
-    # 复制表格内容到剪贴板
+    # Copy the table data to the clipboard
     def copyToClipboard(self):
         data = self.getTextData()
 

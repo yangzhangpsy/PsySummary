@@ -1,3 +1,4 @@
+import ast
 import csv
 import os
 import re
@@ -9,6 +10,7 @@ import numpy as np
 import pandas as pd
 from scipy.io import loadmat
 from scipy.optimize import minimize
+from scipy.stats import boxcox
 
 from .rtDist import gamma_estimate_x, wald_estimate_x, ex_wald_estimate_x, ex_gaussian_estimate_x, \
     inverse_gaussian_estimate_x, shifted_inverse_gaussian_estimate_x, weibull_estimate_x, log_normal_estimate_x, \
@@ -40,6 +42,119 @@ def executeDataFilter(dataFrame, variableName: str, compareType: str, value):
 
 def contains_empty_list(x):
     return any(hasattr(item, '__len__') and len(item) == 0 for item in x)
+
+
+def runBoxcox(df):
+    df, optimal_lambda = boxcox(df)
+    return df
+
+
+def getAttributeChain(node):
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return None
+
+
+class AggregateDataExpressionValidator(ast.NodeVisitor):
+    allowedCalls = {'runBoxcox', 'np.log', 'np.exp', 'np.logical_and', 'np.logical_or'}
+    allowedAttributes = {'self.data', 'np.log', 'np.exp', 'np.logical_and', 'np.logical_or'}
+    allowedNames = {'self', 'np', 'runBoxcox'}
+    allowedBinaryOperators = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.BitAnd, ast.BitOr)
+    allowedUnaryOperators = (ast.UAdd, ast.USub, ast.Invert)
+    allowedCompareOperators = (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)
+
+    def generic_visit(self, node):
+        raise ValueError(f"Unsupported expression element: {type(node).__name__}")
+
+    def visit_Expression(self, node):
+        self.visit(node.body)
+
+    def visit_Name(self, node):
+        if node.id not in self.allowedNames:
+            raise ValueError(f"Unsupported name in expression: {node.id}")
+
+    def visit_Attribute(self, node):
+        attribute_chain = getAttributeChain(node)
+        if attribute_chain not in self.allowedAttributes:
+            raise ValueError(f"Unsupported attribute access in expression: {attribute_chain}")
+
+    def visit_Constant(self, node):
+        return None
+
+    def visit_List(self, node):
+        for element in node.elts:
+            self.visit(element)
+
+    def visit_Tuple(self, node):
+        for element in node.elts:
+            self.visit(element)
+
+    def visit_Subscript(self, node):
+        self.visit(node.value)
+        self.visit(node.slice)
+
+    def visit_Slice(self, node):
+        if node.lower is not None:
+            self.visit(node.lower)
+        if node.upper is not None:
+            self.visit(node.upper)
+        if node.step is not None:
+            self.visit(node.step)
+
+    def visit_BinOp(self, node):
+        if not isinstance(node.op, self.allowedBinaryOperators):
+            raise ValueError(f"Unsupported operator in expression: {type(node.op).__name__}")
+        self.visit(node.left)
+        self.visit(node.right)
+
+    def visit_UnaryOp(self, node):
+        if not isinstance(node.op, self.allowedUnaryOperators):
+            raise ValueError(f"Unsupported unary operator in expression: {type(node.op).__name__}")
+        self.visit(node.operand)
+
+    def visit_Compare(self, node):
+        self.visit(node.left)
+        for operator in node.ops:
+            if not isinstance(operator, self.allowedCompareOperators):
+                raise ValueError(f"Unsupported comparison operator in expression: {type(operator).__name__}")
+        for comparator in node.comparators:
+            self.visit(comparator)
+
+    def visit_Call(self, node):
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id
+        else:
+            func_name = getAttributeChain(node.func)
+
+        if func_name not in self.allowedCalls:
+            raise ValueError(f"Unsupported function in expression: {func_name}")
+
+        for arg in node.args:
+            self.visit(arg)
+
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                raise ValueError("Unsupported keyword expansion in expression.")
+            self.visit(keyword.value)
+
+
+def normalizeCalculateExpression(expression: str):
+    return expression.replace('aggData.data', 'self.data').replace('self.dataFrame', 'self.data')
+
+
+def evaluateCalculateExpression(expression: str, aggregate_data):
+    normalized_expression = normalizeCalculateExpression(expression)
+    parsed_expression = ast.parse(normalized_expression, mode='eval')
+    AggregateDataExpressionValidator().visit(parsed_expression)
+    compiled_expression = compile(parsed_expression, '<aggregate-data-expression>', 'eval')
+    return eval(compiled_expression, {'__builtins__': {}},
+                {'self': aggregate_data, 'np': np, 'runBoxcox': runBoxcox})
 
 
 def getStandardError(x):
@@ -141,7 +256,7 @@ def doFilterOutData(row_var_list: list, column_var_list: list, expression: str, 
                 sd = sumTable2DataFrame(row_var_list, column_var_list, median_table2, dataFrame)
                 sd *= 1.4826
                 # remove the temp_var (abs(x - median(x)))
-                dataFrame.drop(columns=[temp_var_name])
+                dataFrame.drop(columns=[temp_var_name], inplace=True)
 
             else:
                 mean = sumTable2DataFrame(row_var_list, column_var_list, mean_table, dataFrame)
@@ -177,12 +292,12 @@ def filterDataFunc(row_var_list, column_var_list, dataFrame, ruleList, omegaValu
     for index, rule in enumerate(ruleList):
         variable_name, conditional_expression = rule.split(':')
         variable_name = variable_name.strip()
-        # 区分range规则和checklist规则
+        # Distinguish range rules from checklist rules
         if isCompareCond(conditional_expression):
             if not pd.api.types.is_numeric_dtype(tmp_data_frame[variable_name]):
                 tmp_data_frame[variable_name] = pd.to_numeric(tmp_data_frame[variable_name], errors='coerce')
 
-            # range规则
+            # Range rule
             if 'and' in conditional_expression:
                 expression_1, expression_2 = conditional_expression.split('and')
 
@@ -370,9 +485,9 @@ def singleShiftZs(count):
 
 
 def flattenValue(value):
-    if isinstance(value, list) and len(value) > 0 and isinstance(value[0], list):  # 如果是列表（二维数组）
+    if isinstance(value, list) and len(value) > 0 and isinstance(value[0], list):  # Preserve nested lists from MATLAB cell arrays
         return value[0]
-    else:  # 如果是整数值或其他类型的值
+    else:  # Flatten scalar-like values
         if len(value) == 0:
             return None
         if len(value[0]) == 0:
@@ -381,7 +496,7 @@ def flattenValue(value):
             return value[0]
         if len(value[0]) > 1:
             return ','.join(map(str, value[0]))
-        return value[0][0]  # 直接返回该值
+        return value[0][0]  # Return the scalar value
 
 
 def flattenValueMat73(value):
@@ -403,7 +518,7 @@ def flattenValueMat73(value):
     return value
 
 
-def readDatFile(file_path, containsHeader=True, encodingFormat='utf-8', delimiter='\s'):
+def readDatFile(file_path, containsHeader=True, encodingFormat='utf-8', delimiter=r'\s'):
     try:
         df = None
 
@@ -411,8 +526,8 @@ def readDatFile(file_path, containsHeader=True, encodingFormat='utf-8', delimite
             lines = file.readlines()
 
             if containsHeader:
-                variable_names = re.split(delimiter, lines[0].strip())  # 第一行为变量名
-                data = [re.split(delimiter, line.strip()) for line in lines]  # 以分隔符分隔的变量值
+                variable_names = re.split(delimiter, lines[0].strip())  # First row contains variable names
+                data = [re.split(delimiter, line.strip()) for line in lines[1:]]  # Split variable values by delimiter
             else:
                 data = [re.split(delimiter, line.strip()) for line in lines]
                 variable_names = [f"Column{i + 1}" for i in range(len(data[0]))]
@@ -470,7 +585,7 @@ class AggregateData(object):
 
         self.data = pd.concat(dfs, ignore_index=True)
 
-    def readDatFiles(self, fileList, containsHeader=True, encodingFormat='utf-8', delimiter='\s'):
+    def readDatFiles(self, fileList, containsHeader=True, encodingFormat='utf-8', delimiter=r'\s'):
         all_dfs = []
 
         for file in fileList:
@@ -492,7 +607,7 @@ class AggregateData(object):
             mat_data = loadmat(file)
             variable = mat_data.get('allResults_APL')
 
-            # Get column names from the first row: need to be confirmed
+            # Read column names from the first row
             columnList = [str(row.flat[0]) for line in variable[0] for row in line]
 
             # Convert to DataFrame, skipping the first row which contains column names
@@ -535,7 +650,7 @@ class AggregateData(object):
         self.data = pd.concat(data_frames, ignore_index=True)
 
     def calculateVariable(self, target_variable_name, calculate_expression):
-        self.data[target_variable_name] = eval(calculate_expression)
+        self.data[target_variable_name] = evaluateCalculateExpression(calculate_expression, self)
 
     def filterData(self, row_vars, col_vars, ruleList, omegaValues=None):
         if omegaValues is None:
@@ -547,6 +662,8 @@ class AggregateData(object):
     def summaryData(self, row_vars, col_vars, ruleList, target_vars, omegaValues):
         if omegaValues is None:
             omegaValues = [-1 for _ in ruleList]
+
+        self.resultList = []
 
         for target_var in target_vars:
             target_var_name, operation = target_var.split('@')

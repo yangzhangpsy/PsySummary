@@ -106,5 +106,5 @@ class OutputTextEdit(QTextEdit):
 
     def clearMe(self):
         self.clear()
-        self.setHtml(f"{self.text_format}from .aggregateData import AggregateData</p>")
+        self.setHtml(f"{self.text_format}from aggregateData import AggregateData</p>")
         self.append(f"{self.text_format}aggData = AggregateData()</p>")

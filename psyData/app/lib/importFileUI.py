@@ -12,7 +12,7 @@ from app.psyDataFunc import PsyDataFunc
 class ImportFileUI(QDialog):
     def __init__(self, lst, files):
         super().__init__()
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)  # 去除问号按钮
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)  # Remove the help button
         self.setWindowIcon(PsyDataFunc.getImageObject("icon.png", type=1))
 
         self.text_format_comboBox = QComboBox()
@@ -119,23 +119,23 @@ class ImportFileUI(QDialog):
             tmp = self.previewLst
             with open(file_path, 'r', encoding=tmp[0]) as file:
                 lines = file.readlines()
-                variable_names = lines[0].strip().split(tmp[1])  # 第一行为变量名
-                data = [line.strip().split(tmp[1]) for line in lines[1:]]  # 以分隔符分隔的变量值
+                variable_names = lines[0].strip().split(tmp[1])  # First row contains variable names
+                data = [line.strip().split(tmp[1]) for line in lines[1:]]  # Split variable values by delimiter
                 df = pd.DataFrame(data, columns=variable_names)
                 return df
         except Exception as e:
             PsyDataFunc.printOut(f"Error in reading file:{file_path}:{e}", 3)
             return None
 
-    # 读取多个文件
+    # Read multiple files
     def readMultipleFiles(self, fileList):
         all_dfs = []
         try:
             for file in fileList:
                 df = self.readFile(file)
-                fileName = os.path.basename(file)
-                df = df.assign(fileName=fileName)
                 if df is not None:
+                    fileName = os.path.basename(file)
+                    df = df.assign(fileName=fileName)
                     all_dfs.append(df)
             if all_dfs:
                 return pd.concat(all_dfs, ignore_index=True)

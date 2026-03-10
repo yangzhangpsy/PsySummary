@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import QWidget, QHBoxLayout, QDockWidget
 
 class SizeContainerWidget(QWidget):
     """
-    we can set initial size of dock widget by using this.
+    Helper widget for dock size hints.
     """
 
     def __init__(self, parent=None):
@@ -12,7 +12,7 @@ class SizeContainerWidget(QWidget):
 
     def setWidget(self, widget: QWidget):
         """
-        设置包含的widget
+        Wrap a child widget with zero margins.
         :param widget:
         :return:
         """
@@ -27,7 +27,7 @@ class SizeContainerWidget(QWidget):
 
 class DockWidget(QDockWidget):
     """
-    my dock widget, it can resize and set initial size.
+    Dock widget with a custom size hint.
     """
 
     def __init__(self):

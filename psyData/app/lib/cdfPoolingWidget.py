@@ -168,19 +168,19 @@ class MplCanvas(FigureCanvas):
 
     def on_mouse_move(self, event):
         if event.inaxes == self.ax and 0 <= event.xdata <= 1:
-            # 鼠标在范围内时显示十字线
+            # Show crosshairs when the mouse is within range
             self.cross_hair_v.set_visible(True)
             self.cross_hair_h.set_visible(True)
             self.text_annotation.set_visible(True)
 
             self.cross_hair_v.set_xdata([event.xdata, event.xdata])
             self.cross_hair_h.set_ydata([event.ydata, event.ydata])
-            # 使用axes坐标 (相对坐标系)，避免注释超出图像范围
+            # Use axes coordinates (relative coordinates) to keep the annotation inside the figure
             inv = self.ax.transAxes.inverted()
             ax_coord = inv.transform(self.ax.transData.transform((event.xdata, np.maximum(event.ydata, 1 - self.po_hat))))
             ax_x, ax_y = ax_coord
 
-            # 限制注释在图中显示完整
+            # Keep the annotation fully visible in the figure
             ax_x = np.clip(ax_x + 0.02, 0.01, 0.85)
             ax_y = np.clip(ax_y + 0.02, 0.01, 0.95)
 
@@ -190,7 +190,7 @@ class MplCanvas(FigureCanvas):
             self.text_annotation.set_text(f"ω: {event.xdata:.4f}")
 
         else:
-            # 鼠标超出范围隐藏十字线
+            # Hide crosshairs when the mouse leaves the range
             self.cross_hair_v.set_visible(False)
             self.cross_hair_h.set_visible(False)
             self.text_annotation.set_visible(False)

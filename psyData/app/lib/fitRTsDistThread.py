@@ -11,6 +11,7 @@ class FitRTsDistThread(QThread):
     # infoType, infoString, showTimeInfo or not
     fitStatus = pyqtSignal(int, str, bool)
     finished = pyqtSignal(object, list, list, list)
+    fitFailed = pyqtSignal()
 
     # Mapping of distribution names to their configurations
     # Structure: {Display Name: (Internal Name, Parameter Names, Estimation Function)}
@@ -59,8 +60,7 @@ class FitRTsDistThread(QThread):
         except Exception as e:
             # Emit error status if fitting fails
             self.fitStatus.emit(2, f'Fitting error: {str(e)}', True)
-            # raise(e)
-            return
+            self.fitFailed.emit()
 
     def _process_distribution(self):
         """
@@ -83,6 +83,7 @@ class FitRTsDistThread(QThread):
         dist_key = self.distribution
         if dist_key not in self.DISTRIBUTION_MAP:
             self.fitStatus.emit(2, f'Invalid distribution parameter: {dist_key}.', True)
+            self.fitFailed.emit()
             return
 
         # Unpack distribution details

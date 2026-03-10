@@ -15,7 +15,7 @@ class ListWidget(QListWidget):
             self.customContextMenuRequested.connect(self.ShowContextMenu)
 
     def ShowContextMenu(self, pos):
-        # 创建菜单
+        # Create the menu
         context_menu = QMenu(self)
 
         if self.context_menu_type != 2:
@@ -27,16 +27,16 @@ class ListWidget(QListWidget):
 
         if self.context_menu_type != 1:
             self.setSortingEnabled(True)
-            # 递增排序
+            # Sort ascending
             sort_asc_action = QAction("Sort Ascending")
             sort_asc_action.triggered.connect(self.sort_ascending)
             context_menu.addAction(sort_asc_action)
 
-            # 递减排序
+            # Sort descending
             sort_desc_action = QAction("Sort Descending")
             sort_desc_action.triggered.connect(self.sort_descending)
             context_menu.addAction(sort_desc_action)
-        # 显示菜单
+        # Show the menu
         context_menu.exec_(self.mapToGlobal(pos))
 
     def delete_item(self):
@@ -55,9 +55,9 @@ class ListWidget(QListWidget):
         self.listChanged.emit("delete")
 
     def sort_ascending(self):
-        # 递增排序
+        # Sort ascending
         self.sortItems(Qt.AscendingOrder)
 
     def sort_descending(self):
-        # 递减排序
+        # Sort descending
         self.sortItems(Qt.DescendingOrder)

@@ -1,3 +1,4 @@
+import ast
 import sys
 import pandas as pd
 import numpy as np
@@ -41,6 +42,112 @@ class DroppableLineEdit(QLineEdit):
 def runBoxcox(df):
     df, optimal_lambda = boxcox(df)
     return df
+
+
+def getAttributeChain(node):
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return None
+
+
+class VariableExpressionValidator(ast.NodeVisitor):
+    allowedCalls = {'runBoxcox', 'np.log', 'np.exp', 'np.logical_and', 'np.logical_or'}
+    allowedAttributes = {'self.dataFrame', 'np.log', 'np.exp', 'np.logical_and', 'np.logical_or'}
+    allowedNames = {'self', 'np', 'runBoxcox'}
+    allowedBinaryOperators = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.BitAnd, ast.BitOr)
+    allowedUnaryOperators = (ast.UAdd, ast.USub, ast.Invert)
+    allowedCompareOperators = (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)
+
+    def generic_visit(self, node):
+        raise ValueError(f"Unsupported expression element: {type(node).__name__}")
+
+    def visit_Expression(self, node):
+        self.visit(node.body)
+
+    def visit_Name(self, node):
+        if node.id not in self.allowedNames:
+            raise ValueError(f"Unsupported name in expression: {node.id}")
+
+    def visit_Attribute(self, node):
+        attribute_chain = getAttributeChain(node)
+        if attribute_chain not in self.allowedAttributes:
+            raise ValueError(f"Unsupported attribute access in expression: {attribute_chain}")
+
+    def visit_Constant(self, node):
+        return None
+
+    def visit_List(self, node):
+        for element in node.elts:
+            self.visit(element)
+
+    def visit_Tuple(self, node):
+        for element in node.elts:
+            self.visit(element)
+
+    def visit_Subscript(self, node):
+        self.visit(node.value)
+        self.visit(node.slice)
+
+    def visit_Slice(self, node):
+        if node.lower is not None:
+            self.visit(node.lower)
+        if node.upper is not None:
+            self.visit(node.upper)
+        if node.step is not None:
+            self.visit(node.step)
+
+    def visit_BinOp(self, node):
+        if not isinstance(node.op, self.allowedBinaryOperators):
+            raise ValueError(f"Unsupported operator in expression: {type(node.op).__name__}")
+        self.visit(node.left)
+        self.visit(node.right)
+
+    def visit_UnaryOp(self, node):
+        if not isinstance(node.op, self.allowedUnaryOperators):
+            raise ValueError(f"Unsupported unary operator in expression: {type(node.op).__name__}")
+        self.visit(node.operand)
+
+    def visit_Compare(self, node):
+        self.visit(node.left)
+        for operator in node.ops:
+            if not isinstance(operator, self.allowedCompareOperators):
+                raise ValueError(f"Unsupported comparison operator in expression: {type(operator).__name__}")
+        for comparator in node.comparators:
+            self.visit(comparator)
+
+    def visit_Call(self, node):
+        if isinstance(node.func, ast.Name):
+            func_name = node.func.id
+        else:
+            func_name = getAttributeChain(node.func)
+
+        if func_name not in self.allowedCalls:
+            raise ValueError(f"Unsupported function in expression: {func_name}")
+
+        for arg in node.args:
+            self.visit(arg)
+
+        for keyword in node.keywords:
+            if keyword.arg is None:
+                raise ValueError("Unsupported keyword expansion in expression.")
+            self.visit(keyword.value)
+
+
+def evaluateVariableExpression(expression: str, widget):
+    parsed_expression = ast.parse(expression, mode='eval')
+    VariableExpressionValidator().visit(parsed_expression)
+    compiled_expression = compile(parsed_expression, '<variable-expression>', 'eval')
+    return eval(compiled_expression, {'__builtins__': {}}, {'self': widget, 'np': np, 'runBoxcox': runBoxcox})
+
+
+def convertExpressionToAggregateData(expression: str):
+    return expression.replace('self.dataFrame', 'self.data')
 
 
 class VariableCompute(QWidget):
@@ -143,10 +250,10 @@ class VariableCompute(QWidget):
         main_layout.addLayout(operators_layout, 1, 1, 3, 2)
         main_layout.addLayout(button_layout, 7, 0, 1, 4)
 
-        # Setting layout to main widget
+        # Set the main layout
         self.setLayout(main_layout)
 
-        # Enable drag and drop
+        # Allow dragging items out of the list
         self.variable_list.setDragEnabled(True)
         self.variable_list.setDragDropMode(QListWidget.DragOnly)
 
@@ -174,28 +281,29 @@ class VariableCompute(QWidget):
         if text in translateDict:
             text = translateDict[text]
 
-            # 获取当前状态
+            # Cache the cursor state
         cursor_pos = self.numeric_expression.cursorPosition()
         original_length = len(self.numeric_expression.text())
         is_at_end = cursor_pos == original_length
 
-        # 插入表达式
+        # Insert the template
         self.numeric_expression.insert(text)
 
-        # 仅当光标在末尾且是转换后的表达式时处理
+        # Put the cursor inside function templates
         if is_at_end and original_text in translateDict:
-            # 直接查找第一个左括号位置
+            # Find the first opening parenthesis
             lparen_pos = text.find('(')
             if lparen_pos != -1:
-                # 定位到第一个括号后
+                # Move inside the first parentheses
                 new_pos = cursor_pos + lparen_pos + 1
                 self.numeric_expression.setCursorPosition(new_pos)
             else:
-                # 无括号则定位到末尾
+                # Otherwise move to the end
                 self.numeric_expression.setCursorPosition(cursor_pos + len(text))
         else:
-            # 非末尾保持原有逻辑
+            # Keep the default mid-string behavior
             self.numeric_expression.setCursorPosition(cursor_pos + len(text))
+
     def on_operator_button_click_old(self, text):
         translateDict = {'log': 'np.log()',
                          'exp': 'np.exp()',
@@ -235,7 +343,7 @@ class VariableCompute(QWidget):
 
         if target_variable_name not in self.dataFrame.columns:
             try:
-                df = eval(calculate_expression)
+                df = evaluateVariableExpression(calculate_expression, self)
                 self.dataFrame[target_variable_name] = df
 
                 self.variables.append(target_variable_name)
@@ -245,7 +353,8 @@ class VariableCompute(QWidget):
                 # emit signal
                 self.transformFinished.emit(target_variable_name)
                 # only generate the script after successfully executing the computation
-                PsyDataFunc.genScript(f"aggData.data['{target_variable_name}'] = {calculate_expression}")
+                script_expression = convertExpressionToAggregateData(calculate_expression)
+                PsyDataFunc.genScript(f"aggData.calculateVariable({target_variable_name!r}, {script_expression!r})")
 
                 self.close()
 

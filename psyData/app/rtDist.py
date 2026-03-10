@@ -655,8 +655,8 @@ def plot_weibull_fit(data, estimated_params):
     plt.title(f'Weibull Fit\nShape: {shape:.4f}, Scale: {scale:.4f}')
     plt.legend()
     plt.show()
-    plt.pause(0.001)  # 让 Python 继续执行后续代码
-    plt.ioff()  # 关闭交互模式
+    plt.pause(0.001)  # Let Python continue executing subsequent code
+    plt.ioff()  # Turn off interactive mode
 
 
 # Demo code:
@@ -840,8 +840,8 @@ def plot_gamma_fit(data, estimated_params):
     plt.title(f'Gamma Fit\nShape: {shape:.4f}, Scale: {scale:.4f}')
     plt.legend()
     plt.show()
-    plt.pause(0.001)  # 让 Python 继续执行后续代码
-    plt.ioff()  # 关闭交互模式
+    plt.pause(0.001)  # Let Python continue executing subsequent code
+    plt.ioff()  # Turn off interactive mode
 
 
 def gammaRunDemo():
@@ -931,8 +931,8 @@ def plot_inverse_gaussian_fit(data, estimated_params):
     plt.title(f'Inverse Gaussian Fit\nMu: {mu:.4f}, Lambda: {lambda_:.4f}')
     plt.legend()
     plt.show()
-    plt.pause(0.001)  # 让 Python 继续执行后续代码
-    plt.ioff()  # 关闭交互模式
+    plt.pause(0.001)  # Let Python continue executing subsequent code
+    plt.ioff()  # Turn off interactive mode
 
 
 def inverseGaussianRunDemo():
@@ -1022,7 +1022,7 @@ def plot_shifted_inverse_gaussian_fit(data, estimated_params):
     plt.ylabel('Density')
     plt.title(f'Shifted Inverse Gaussian Fit\nMu: {mu:.4f}, Lambda: {lambda_:.4f}, Shift: {shift:.4f}')
     plt.legend()
-    plt.draw()  # 让 Matplotlib 绘制图像但不阻塞
+    plt.draw()  # Let Matplotlib draw without blocking
     plt.show()
 
 
@@ -1071,7 +1071,7 @@ def CDF_pooling_main(rt_df, sub_vars_list, cond_vars_list, rt_var_name,
         unique_combinations = pd.DataFrame({'no_var': [1]})
 
     for _, combo in unique_combinations.iterrows():
-        # 构建行筛选条件
+        # Build row filtering conditions
         condition = np.ones(len(rt_df), dtype=bool)
         for col in group_keys:
             condition &= (rt_df[col] == combo[col])
