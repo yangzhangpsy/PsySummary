@@ -567,6 +567,14 @@ drag the variable back to the variable list.
             columnList = getListWidgetData(self.columns_list)
             dataList = getListWidgetData(self.data_list)
 
+            if not dataList:
+                MessageBox.information(
+                    self,
+                    'Warning',
+                    'No Data variable is defined. Drag at least one variable into the Data area '
+                    'before running Data Summary.')
+                return None
+
             items = self.getFilterList()
 
             self.pivotTableWindow = PivotedDataWidget(self.data, rowList, columnList, dataList, items)
@@ -594,6 +602,10 @@ drag the variable back to the variable list.
     def closeEvent(self, event):
         if self.pivotTableWindow:
             self.pivotTableWindow.close()
+        if self.filterWindow:
+            self.filterWindow.close()
+        if self.computationVariableGui:
+            self.computationVariableGui.close()
         super().closeEvent(event)
 
     def getGlobalPosition(self):

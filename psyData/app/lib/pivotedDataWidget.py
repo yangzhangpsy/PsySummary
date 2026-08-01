@@ -26,12 +26,20 @@ def groupby_to_pivot_tables(grouped_result, index_var=None, columns_var=None):
 
     Returns: Dictionary of DataFrames
     """
+    if grouped_result is None:
+        return []
+
     # Convert grouped result to DataFrame
     # Handle both Series and DataFrame inputs
     if isinstance(grouped_result, pd.Series):
+        if grouped_result.empty:
+            return []
         df = grouped_result.apply(pd.Series)
     else:
-        df = grouped_result
+        df = grouped_result.copy()
+
+    if isinstance(df, pd.Series) or df.empty or not hasattr(df, 'columns'):
+        return []
 
         # Reset index to prepare for pivot operation
     df_reset = df.reset_index()
@@ -122,6 +130,7 @@ class PivotedDataWidget(QWidget):
         self.filterStr = ''
         self.ruleList = ruleList
         self.result_frame_var_names = []
+        self.fit_error_message = None
         self.fitMethods = ['Gamma (k, θ)',
                            'Weibull (k, θ)',
                            'LogNormal (k, θ)',
@@ -140,9 +149,8 @@ class PivotedDataWidget(QWidget):
         self.fit_dist_thread = FitRTsDistThread(dataFrame, operation, row_vars, col_vars, independentVarName,
                                                 distribution)
 
-        self.fit_dist_thread.fitStatus.connect(handleFitThreadSignal)
+        self.fit_dist_thread.fitStatus.connect(self.handleFitStatus)
         self.fit_dist_thread.finished.connect(self.handleFitFinished)
-        self.fit_dist_thread.fitFailed.connect(self.handleFitFailed)
 
         self.fit_dist_thread.start()
 
@@ -188,6 +196,11 @@ class PivotedDataWidget(QWidget):
                     dataframe[target_var_name] = pd.to_numeric(dataframe[target_var_name], errors='coerce')
 
             tmpDataFrame = StatisticTool.filterData(row_vars, col_vars, dataframe, self.ruleList)
+
+            if tmpDataFrame.empty:
+                empty_filter_message = 'No data remain after applying the current filters. Analysis was skipped.'
+                PsyDataFunc.printOut(empty_filter_message, 4)
+                raise ValueError(empty_filter_message)
 
             # we check this within the filterData function
             # StatisticTool.checkEmptyNullValue(tmpDataFrame, row_vars, col_vars)
@@ -252,6 +265,7 @@ class PivotedDataWidget(QWidget):
                                                 aggfunc=getStandardError)
 
                 elif operation in self.fitMethods:
+                    self.validateFitInput(tmpDataFrame, target_var_name, operation)
                     self.asynchronous = True
                     self.fitDistInBackground(tmpDataFrame, operation, row_vars, col_vars, target_var_name, operation)
 
@@ -264,14 +278,19 @@ class PivotedDataWidget(QWidget):
                 if operation not in self.fitMethods:
                     self.updateResultDataframe(result, target_var)
 
-            pd.set_option('display.float_format', lambda x: '%.10f' % x)
-            # Generate one script per summary
-            generateScript(row_vars, col_vars, target_vars, self.ruleList)
+                pd.set_option('display.float_format', lambda x: '%.10f' % x)
+                # Generate one script per summary
+                generateScript(row_vars, col_vars, target_vars, self.ruleList)
+
+            if not self.resultList:
+                if self.fit_error_message:
+                    raise ValueError(self.fit_error_message)
+                raise ValueError('No valid results were generated for the current selection.')
+
+            self.createResultTable(col_vars, row_vars)
 
         except Exception as e:
             raise Exception(e)
-
-        self.createResultTable(col_vars, row_vars)
 
     def start_fitting(self):
         self.timer = QTimer()
@@ -325,18 +344,30 @@ class PivotedDataWidget(QWidget):
     def handleFitFinished(self, result, target_var, row_vars, col_vars):
         if result is not None:
             result = groupby_to_pivot_tables(result, row_vars, col_vars)
-            self.updateResultDataframe(result, target_var)
+            if result:
+                self.updateResultDataframe(result, target_var)
+            elif not self.fit_error_message:
+                self.fit_error_message = 'No valid fit results were generated for the current filters.'
 
-        self.finishFitThread()
-
-    def handleFitFailed(self):
-        self.finishFitThread()
-
-    def finishFitThread(self):
         self.asynchronous = False
-        if self.fit_dist_thread is not None:
-            self.fit_dist_thread.wait()
-            self.fit_dist_thread = None
+        self.fit_dist_thread.quit()
+        self.fit_dist_thread.wait()
+
+    def handleFitStatus(self, infoType: int, infoStr: str, showTime: bool = True):
+        if infoType >= 2:
+            self.fit_error_message = infoStr
+        handleFitThreadSignal(infoType, infoStr, showTime)
+
+    def validateFitInput(self, dataFrame, target_var_name, operation):
+        if dataFrame.empty:
+            raise ValueError(
+                f"No data remain after applying the current filters, so {operation} cannot be fitted.")
+
+        numeric_values = pd.to_numeric(dataFrame[target_var_name], errors='coerce')
+        numeric_values = numeric_values[np.isfinite(numeric_values)]
+        if numeric_values.empty:
+            raise ValueError(
+                f"No valid numeric data remain in '{target_var_name}' after filtering, so {operation} cannot be fitted.")
 
     def updateResultDataframe(self, result, target_var):
         if isinstance(target_var, list):

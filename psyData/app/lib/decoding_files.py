@@ -19,6 +19,7 @@ class DecodingFiles(Dialog):
 
         self.files = files
         self.data = pd.DataFrame()
+        self.last_error = ""
 
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)  # Remove the help button
         self.setWindowModality(Qt.WindowModal)
@@ -102,22 +103,39 @@ class DecodingFiles(Dialog):
         self.close()
 
     def reloadShortData(self):
-        self.view_table.setRowCount(0)
+        self.clearPreview()
         self.setData()
+
+    def clearPreview(self):
+        """Clear all rows, columns, and headers from the preview table."""
+        self.view_table.clear()
+        self.view_table.setRowCount(0)
+        self.view_table.setColumnCount(0)
 
     def readFinalData(self):
         data = self.readMultipleFiles(self.files, True, False)
         return data
 
     def setData(self):
-        if self.files:
-            try:
-                data = self.readMultipleFiles(self.files)
-                self.setTable(data)
-            except Exception as e:
-                msg = MessageBox(QMessageBox.Warning, "Warning",
-                                 f"Please choose a different encoding for the error.\n{e}")
-                msg.exec_()
+        if not self.files:
+            self.clearPreview()
+            self.ok_btn.setEnabled(False)
+            return
+
+        data = self.readMultipleFiles(self.files)
+        if data is None:
+            self.clearPreview()
+            self.ok_btn.setEnabled(False)
+            msg = MessageBox(
+                QMessageBox.Warning,
+                "Warning",
+                f"Unable to decode the selected file(s).\n{self.last_error}\n\n"
+                "Please choose a different encoding or delimiter.")
+            msg.exec_()
+            return
+
+        self.setTable(data)
+        self.ok_btn.setEnabled(True)
 
     def setTable(self, data):
         rowNum = min(data.shape[0], 10)
@@ -137,16 +155,12 @@ class DecodingFiles(Dialog):
         text_format = self.text_format_comboBox.currentText()
         delimiter = self.delimiter_comboBox.currentText()
 
-        specialCharDict = {"WhiteSpace": r"\s",
-                           '.': r'\.',
-                           "$": r"\$",
-                           "^": r"\^",
-                           "*": r"\*",
-                           "+": r"\+",
-                           "|": r"\|"}
-
-        if delimiter in specialCharDict:
-            delimiter = specialCharDict[delimiter]
+        if delimiter == "WhiteSpace":
+            delimiter = r"\s"
+        elif delimiter:
+            delimiter = re.escape(delimiter)
+        else:
+            raise ValueError("The delimiter cannot be empty.")
 
         return text_format, delimiter
 
@@ -155,67 +169,69 @@ class DecodingFiles(Dialog):
             raise ValueError("File path is empty or not provided.")
 
         try:
-            df = None
-
-            [code, splitCode] = self.getFormatAndDelimiter()
-
-            with open(file_path, 'r', encoding=code) as file:
-                lines = file.readlines()
-
-                if readAllRows:
-                    max_rows = len(lines)
-                else:
-                    max_rows = min(10, len(lines))
-
-                if self.contains_header_check.isChecked():
-                    variable_names = re.split(splitCode, lines[0].strip())  # First row contains variable names
-                    data = [re.split(splitCode, line.strip()) for line in lines[1:max_rows]]  # Split variable values by delimiter
-                else:
-                    data = [re.split(splitCode, line.strip()) for line in lines[0:max_rows]]
-                    variable_names = [f"Column{i + 1}" for i in range(len(data[0]))]
-
-                df = pd.DataFrame(data)
-
-                if len(variable_names) >= df.shape[1]:
-                    df.columns = variable_names[:df.shape[1]]
-                else:
-                    df.columns = variable_names + [f'untitled{iVar}' for iVar in
-                                                   range(df.shape[1] - len(variable_names))]
-                # return df
+            encoding_code, delimiter = self.getFormatAndDelimiter()
+            data = pd.read_csv(
+                file_path,
+                sep=delimiter,
+                encoding=encoding_code,
+                nrows=None if readAllRows else 10,
+                header=0 if self.contains_header_check.isChecked() else None,
+                engine="python")
+            if not self.contains_header_check.isChecked():
+                data.columns = [f"Column{i + 1}" for i in range(data.shape[1])]
+            return data
         except (IOError, OSError, FileNotFoundError) as e:
-            PsyDataFunc.printOut(f"Error in reading file! File probably changed/moved.:{file_path}:{e}", 3)
-            # return None
-
+            self.reportReadError(f"File access error: {file_path} - {e}")
         except Exception as e:
-            PsyDataFunc.printOut(f"Error in reading file! File probably has bad format:{file_path}:{e}", 3)
-            # return None
-        finally:
-            return df
+            self.reportReadError(f"Parsing error: {file_path} - {e}")
+        return None
+
+    def reportReadError(self, message):
+        """Store a read error and send it to the application output when available."""
+        self.last_error = message
+        try:
+            PsyDataFunc.printOut(message, 3)
+        except (AttributeError, RuntimeError):
+            print(message)
 
     # Read multiple files
     def readMultipleFiles(self, fileList, readAllRows=False, addFilenameVariable=False):
         all_dfs = []
+        read_errors = []
+        self.last_error = ""
         try:
             if isinstance(fileList, list):
                 for file in fileList:
                     df = self.readFile(file, readAllRows)
 
-                    if df is not None:
-                        if addFilenameVariable:
-                            fileName = os.path.basename(file)
-                            if fileName not in df.columns:
-                                df = df.assign(fileName=fileName)
+                    if df is None:
+                        read_errors.append(self.last_error or f"Unable to read file: {file}")
+                        continue
 
-                        all_dfs.append(df)
+                    if addFilenameVariable:
+                        fileName = os.path.basename(file)
+                        if fileName not in df.columns:
+                            df = df.assign(fileName=fileName)
 
-                if all_dfs:
-                    return pd.concat(all_dfs, ignore_index=True)
-                else:
+                    all_dfs.append(df)
+
+                if read_errors:
+                    self.last_error = "\n".join(read_errors)
                     return None
-            else:
-                return None
+
+                if not all_dfs:
+                    self.last_error = "No readable files were selected."
+                    return None
+
+                if len(all_dfs) == 1:
+                    return all_dfs[0]
+
+                return pd.concat(all_dfs, ignore_index=True, copy=False)
+
+            self.last_error = "The file list is invalid."
+            return None
         except Exception as e:
-            PsyDataFunc.printOut(f"Error in reading file:{e}", 3)
+            self.reportReadError(f"Error while combining decoded files: {e}")
             return None
 
     def rejectEvent(self):

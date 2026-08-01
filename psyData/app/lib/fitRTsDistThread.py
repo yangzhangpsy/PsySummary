@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 from PyQt5.QtCore import QThread, pyqtSignal
 
@@ -11,7 +12,6 @@ class FitRTsDistThread(QThread):
     # infoType, infoString, showTimeInfo or not
     fitStatus = pyqtSignal(int, str, bool)
     finished = pyqtSignal(object, list, list, list)
-    fitFailed = pyqtSignal()
 
     # Mapping of distribution names to their configurations
     # Structure: {Display Name: (Internal Name, Parameter Names, Estimation Function)}
@@ -60,7 +60,7 @@ class FitRTsDistThread(QThread):
         except Exception as e:
             # Emit error status if fitting fails
             self.fitStatus.emit(2, f'Fitting error: {str(e)}', True)
-            self.fitFailed.emit()
+            self.finished.emit(None, [], self.row_vars, self.col_vars)
 
     def _process_distribution(self):
         """
@@ -83,7 +83,7 @@ class FitRTsDistThread(QThread):
         dist_key = self.distribution
         if dist_key not in self.DISTRIBUTION_MAP:
             self.fitStatus.emit(2, f'Invalid distribution parameter: {dist_key}.', True)
-            self.fitFailed.emit()
+            self.finished.emit(None, [], self.row_vars, self.col_vars)
             return
 
         # Unpack distribution details
@@ -96,19 +96,42 @@ class FitRTsDistThread(QThread):
         else:
             self.fitStatus.emit(0, f"Start to fit the data dist via {dist_key}...", False)
 
-            # Prepare grouping variables
+        prepared_frame = self._prepare_fit_dataframe()
+
+        # Prepare grouping variables
         group_vars = self.row_vars + self.col_vars
 
         # Perform estimation (with or without grouping)
         if group_vars:
             # Grouped estimation
-            grouped_result = self.dataFrame.groupby(group_vars)[self.independentVarName].apply(estimate_func)
+            grouped_result = prepared_frame.groupby(group_vars)[self.independentVarName].apply(estimate_func)
         else:
             # Single estimation
-            grouped_result = pd.Series({'result': estimate_func(self.dataFrame[self.independentVarName])})
+            grouped_result = pd.Series({'result': estimate_func(prepared_frame[self.independentVarName])})
+
+        if grouped_result.empty:
+            raise ValueError('No fit results were generated for the current filters.')
 
             # Generate fully qualified parameter names
         full_parameter_names = [f"{self.independentVarName}@{self.operation} {item}" for item in parameter_names]
 
         # Emit final results
         self.finished.emit(grouped_result, full_parameter_names, self.row_vars, self.col_vars)
+
+    def _prepare_fit_dataframe(self):
+        required_columns = []
+        for column_name in self.row_vars + self.col_vars + [self.independentVarName]:
+            if column_name not in required_columns:
+                required_columns.append(column_name)
+
+        target_values = pd.to_numeric(self.dataFrame[self.independentVarName], errors='coerce')
+        valid_mask = target_values.notna() & np.isfinite(target_values)
+
+        prepared_frame = self.dataFrame.loc[valid_mask, required_columns].copy()
+        prepared_frame[self.independentVarName] = target_values.loc[valid_mask].to_numpy()
+
+        if prepared_frame.empty:
+            raise ValueError(
+                f"No valid numeric data remain in '{self.independentVarName}' after filtering.")
+
+        return prepared_frame
