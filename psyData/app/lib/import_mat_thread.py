@@ -1,16 +1,28 @@
 import os
+import traceback
 
+# import mat73
 import numpy as np
 import pandas as pd
 from scipy.io import loadmat
 
 from PyQt5.QtCore import QThread, pyqtSignal
+from app.lib.source_file import addSourceFileColumn
+
+
+def mapDataFrameElements(dataFrame, function):
+    """Apply a scalar function with both current and legacy pandas versions."""
+    mapper = getattr(dataFrame, "map", None)
+    if mapper is None:
+        mapper = dataFrame.applymap
+    return mapper(function)
 
 
 def flattenValue(value):
-    if isinstance(value, list) and len(value) > 0 and isinstance(value[0], list):  # Preserve nested lists from MATLAB cell arrays
+
+    if isinstance(value, list) and len(value) > 0 and isinstance(value[0], list):  # 如果是列表（二维数组）
         return value[0]
-    else:  # Flatten scalar-like values
+    else:  # 如果是整数值或其他类型的值
         if len(value) == 0:
             return None
         if len(value[0]) == 0:
@@ -19,10 +31,11 @@ def flattenValue(value):
             return value[0]
         if len(value[0]) > 1:
             return ','.join(map(str, value[0]))
-        return value[0][0]  # Return the scalar value
+        return value[0][0]  # 直接返回该值
 
 
 def flattenValueMat73(value):
+
     if isinstance(value, (np.bool_, bool)):
         return float(value)
 
@@ -84,10 +97,12 @@ class ImportMatThread(QThread):
 
         except Exception as e:
             self.readStatus.emit(2, f"IOError: {e}")
+            # traceback.print_exc()
 
     def readMatlabFiles(self):
         # Pre-allocate a list to store DataFrames for better efficiency
         data_frames = []
+        loaded_files = []
         combined_df = pd.DataFrame()
 
         for file in self.files:
@@ -98,9 +113,13 @@ class ImportMatThread(QThread):
                     if variable is None:
                         self.readStatus.emit(2, f"Failed to find 'allResults_APL' in {os.path.basename(file)} !")
                         continue
+                    # # 获取第0行列名
+                    # columnNames = [[row.flat[0] for row in line] for line in variable[0]]
+                    # # 转二位数组为一维数组, 注：这个数组里面的都是<class 'numpy.str_'>
+                    # columnList = [element for sublist in columnNames for element in sublist]
+                    # columnList = [str(x) for x in columnList]
 
-                    # Read column names from the first row
-                    # Assign placeholder names to empty headers
+                    # Get column names from the first row: need to be confirmed
                     columnList = []
                     untitled_num = 1
 
@@ -110,29 +129,30 @@ class ImportMatThread(QThread):
                                 columnList.append(row.flat[0])
                             else:
                                 cTitle = f'untitled{untitled_num}'
-                                while cTitle in columnList:
-                                    untitled_num += 1
-                                    cTitle = f'untitled{untitled_num}'
-                                columnList.append(cTitle)
                                 untitled_num += 1
+                                while cTitle in columnList:
+                                    cTitle = f'untitled{untitled_num}'
+                                    untitled_num += 1
+                                columnList.append(cTitle)
+
                     # columnList = [str(row.flat[0]) for line in variable[0] for row in line]
 
                     # Convert to DataFrame, skipping the first row which contains column names
                     df = pd.DataFrame(variable[1:], columns=columnList)
                     # Apply the flatten function to all DataFrame elements
-                    df = df.applymap(flattenValue)
+                    df = mapDataFrameElements(df, flattenValue)
 
-                    # Add filename if not present
-                    if 'filename' not in columnList:
-                        df['filename'] = os.path.basename(file)
                     # Append DataFrame to list
                     data_frames.append(df)
+                    loaded_files.append(file)
                     self.readStatus.emit(0, f"Reading file: {file}")
                 except Exception as e:
                     self.readStatus.emit(2, f"IOError: {e}")
 
             # Concatenate all DataFrames at once for efficiency
         if data_frames:
+            data_frames, _source_column = addSourceFileColumn(
+                data_frames, loaded_files, existing_source_columns=('filename',))
             combined_df = pd.concat(data_frames, ignore_index=True)
 
         return combined_df
@@ -141,6 +161,7 @@ class ImportMatThread(QThread):
         import mat73
         # Pre-allocate a list to store DataFrames for better efficiency
         data_frames = []
+        loaded_files = []
         combined_df = pd.DataFrame()
 
         for file in self.files:
@@ -149,27 +170,25 @@ class ImportMatThread(QThread):
                     mat_dat = mat73.loadmat(file)
                     variable = mat_dat.get('allResults_APL', None)
                     if variable is None:
-                        self.readStatus.emit(2,
-                                             f"Failed to find variable allResults_APL in {os.path.basename(file)}.mat !")
+                        self.readStatus.emit(2, f"Failed to find variable allResults_APL in {os.path.basename(file)}.mat !")
                         continue
 
                     df = pd.DataFrame(variable[1:], columns=variable[0])
-                    # df = df.applymap(flattenValueMat73)
-                    df = df.map(flattenValueMat73)
+                    # df = mapDataFrameElements(df, flattenValueMat73)
+                    df = mapDataFrameElements(df, flattenValueMat73)
                     # df = df.apply(lambda col: col.map(flattenValueMat73))
-
-                    # Add filename if not present
-                    if 'filename' not in variable[1:]:
-                        df['filename'] = os.path.basename(file)
 
                     # Append DataFrame to list
                     data_frames.append(df)
+                    loaded_files.append(file)
 
                     self.readStatus.emit(0, f"Reading file: {file}")
                 except Exception as e:
                     self.readStatus.emit(2, f"IOError: {e}")
             # Concatenate all DataFrames at once for efficiency
         if data_frames:
+            data_frames, _source_column = addSourceFileColumn(
+                data_frames, loaded_files, existing_source_columns=('filename',))
             combined_df = pd.concat(data_frames, ignore_index=True)
 
         return combined_df

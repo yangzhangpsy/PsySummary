@@ -211,7 +211,8 @@ class VariableCompute(QWidget):
 
         for position, button_text in zip(positions, buttons):
             button = QPushButton(button_text)
-            button.setFixedSize(50, 50)
+            button_width = 70 if position[1] == 4 else 50
+            button.setFixedSize(button_width, 50)
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
             if button_text == 'Del':

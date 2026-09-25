@@ -9,3 +9,4 @@ from .var_combo_box import VarComboBox
 from .dialog import Dialog
 from .dock_widget import DockWidget
 from .decoding_files import DecodingFiles
+from .settings import Settings

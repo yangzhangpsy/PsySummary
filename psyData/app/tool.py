@@ -3,17 +3,40 @@ from operator import lt, le, gt, ge
 
 import numpy as np
 import pandas as pd
-from PyQt5.QtCore import QTimer
-from PyQt5.QtWidgets import QMessageBox
-
+from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtWidgets import QMessageBox, QDialog, QVBoxLayout
+from app.func import Func
 from app.lib import MessageBox
-from app.lib.cdfPoolingWidget import fit_outlier_model, CdfPoolingWidget
 from app.psyDataFunc import PsyDataFunc
 from app.rtDist import CDF_pooling_main
+from app.lib.cdfPoolingWidget import fit_outlier_model, CdfPoolingWidget
 
 
-# from rtDist import CDF_pooling_main
-# from app.lib import fit_outlier_model, CdfPoolingWidget
+CONDITION_WISE_FILTER_REFERENCE = (
+    'André, Q. (2022). Outlier exclusion procedures must be blind to the researcher\'s hypothesis. '
+    'Journal of Experimental Psychology: General, 151(1), 213–223. '
+    'https://doi.org/10.1037/xge0001069'
+)
+
+
+def warnConditionWiseFiltering(row_var_list, column_var_list, data_frame, rule_list):
+    """Log a warning when active filters are combined with multiple observed data cells."""
+    grouping_variables = list(dict.fromkeys(list(row_var_list) + list(column_var_list)))
+    if not rule_list or not grouping_variables:
+        return 0
+    combination_count = int(data_frame[grouping_variables].drop_duplicates().shape[0])
+    if combination_count > 1:
+        grouping_label = ' × '.join(grouping_variables)
+        PsyDataFunc.printOut(
+            'Potential condition-wise filtering: The current Rows × Columns settings define '
+            f'{combination_count} observed data cells ({grouping_label}) while filters are active. '
+            'Any exclusion criterion estimated within these cells is applied separately by condition, '
+            'which can exaggerate between-condition differences. Consider computing exclusion criteria '
+            'blind to the experimental condition (for example, within participant but collapsed across '
+            f'conditions). Reference: {CONDITION_WISE_FILTER_REFERENCE}',
+            4,
+        )
+    return combination_count
 
 
 def isCompareCond(expression: str):
@@ -120,6 +143,7 @@ def validate_inputs(row_var_list, column_var_list, sumTable, dataFrame):
 
 
 def getValueInExpression(expression: str):
+
     numbers_str_list = re.findall(r"-?\d+\.\d+|-?\d+", expression)
     if not numbers_str_list:
         raise ValueError("No number found in expression.")
@@ -174,7 +198,7 @@ def doFilterOutData(row_var_list: list, column_var_list: list, expression: str, 
                 sd = sumTable2DataFrame(row_var_list, column_var_list, median_table2, dataFrame)
                 sd *= 1.4826
                 # remove the temp_var (abs(x - median(x)))
-                dataFrame.drop(columns=[temp_var_name], inplace=True)
+                dataFrame.drop(columns=[temp_var_name])
 
             else:
                 mean = sumTable2DataFrame(row_var_list, column_var_list, mean_table, dataFrame)
@@ -269,7 +293,7 @@ class StatisticTool:
             z_score = 1
         return z_score
 
-    # Convert rules
+    # 转换规则
 
     @staticmethod
     def filterData(row_var_list, column_var_list, dataFrame, ruleList):
@@ -286,12 +310,12 @@ class StatisticTool:
             if 'Pooling CDF' != conditional_expression:
                 be_printed_omega_str += '-1, '
 
-            # Distinguish range rules from checklist rules
+            # 区分range规则和checklist规则
             if isCompareCond(conditional_expression):
                 if not pd.api.types.is_numeric_dtype(tmp_data_frame[variable_name]):
                     tmp_data_frame[variable_name] = pd.to_numeric(tmp_data_frame[variable_name], errors='coerce')
 
-                # Range rule
+                # range规则
                 if 'and' in conditional_expression:
                     expression_1, expression_2 = conditional_expression.split('and')
 

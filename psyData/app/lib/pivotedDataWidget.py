@@ -1,14 +1,19 @@
 import time
+import traceback
 
 from PyQt5.QtCore import QTimer, QEventLoop
 from PyQt5.QtWidgets import QVBoxLayout, QWidget, QLabel, QPushButton, QApplication, QFileDialog, QHBoxLayout, QSpinBox
 import pandas as pd
 import numpy as np
 
+from app.func import Func
 from app.lib.fitRTsDistThread import FitRTsDistThread
+from app.lib.fitCognitiveModelThread import FitCognitiveModelThread
+from app.cognitiveModelSpec import COGNITIVE_MODEL_NAMES, split_target
 from app.psyDataFunc import PsyDataFunc
-from app.tool import StatisticTool, FlashMessageBox
+from app.tool import StatisticTool, FlashMessageBox, warnConditionWiseFiltering
 from app.lib.dataFrameTableWidget import ResultFrameTableWidget
+from app.lib.rtFitDiagnostics import RTFitDiagnosticsDialog
 
 
 def getStandardError(x):
@@ -92,9 +97,13 @@ def groupby_to_pivot_tables(grouped_result, index_var=None, columns_var=None):
 def checkVariablesDuplication(row_vars, col_vars, target_vars):
     rowAndColVars = row_vars + col_vars
     for target_var in target_vars:
-        target_var_name, operation = target_var.split('@')
+        target_var_name, operation, specification = split_target(target_var)
         allVariables = rowAndColVars.copy()
         allVariables.append(target_var_name)
+        if specification:
+            allVariables.append(specification['response_variable'])
+            if specification.get('accuracy_variable'):
+                allVariables.append(specification['accuracy_variable'])
 
         if len(allVariables) != len(set(allVariables)):
             seen = set()
@@ -106,10 +115,14 @@ def checkVariablesDuplication(row_vars, col_vars, target_vars):
 
 
 def generateScript(row_vars, col_vars, target_vars, ruleList):
+    if any(isinstance(target, dict) for target in target_vars):
+        target_script = f'targetVariables = {target_vars!r}'
+    else:
+        target_script = PsyDataFunc.list2Script(target_vars, 'targetVariables')
     analysis_script = [PsyDataFunc.list2Script(row_vars, 'rowVariables'),
                        PsyDataFunc.list2Script(col_vars, 'colVariables'),
                        PsyDataFunc.list2Script(ruleList, 'ruleList'),
-                       PsyDataFunc.list2Script(target_vars, 'targetVariables'),
+                       target_script,
                        "aggData.summaryData(rowVariables, colVariables, ruleList, targetVariables, cdfPoolingOmegas)"]
 
     PsyDataFunc.genScript(analysis_script)
@@ -125,21 +138,27 @@ class PivotedDataWidget(QWidget):
         self.fit_dist_thread = None
         self.table = None
         self.msg_box = None
-        self.asynchronous = False  # Whether a background fitting task is still running
+        self.asynchronous = False  # status of asynchronous of the fit thread
         self.resultList = []
         self.filterStr = ''
         self.ruleList = ruleList
         self.result_frame_var_names = []
         self.fit_error_message = None
+        self.fit_records = []
+        self.fit_diagnostics_dialog = None
         self.fitMethods = ['Gamma (k, θ)',
+                           'Shifted Gamma (k, θ, shift)',
                            'Weibull (k, θ)',
+                           'Shifted Weibull (k, θ, shift)',
                            'LogNormal (k, θ)',
+                           'Shifted LogNormal (k, θ, shift)',
                            'Wald (m, a)',
                            'Ex-Wald (m, a, τ)',
                            'Shifted Wald (m, a, shift)',
                            'Ex-Gaussian (μ, σ, τ)',
                            'Inv-Gaussian (μ, λ)',
                            'Shifted Inv-Gaussian (μ, λ, shift)']
+        self.cognitiveFitMethods = list(COGNITIVE_MODEL_NAMES)
 
         self.initUI(dataframe, row_vars, col_vars, target_vars)
 
@@ -154,8 +173,16 @@ class PivotedDataWidget(QWidget):
 
         self.fit_dist_thread.start()
 
+    def fitCognitiveModelInBackground(self, dataFrame, specification, row_vars, col_vars):
+        """Start one grouped cognitive-model fitting worker."""
+        self.fit_dist_thread = FitCognitiveModelThread(
+            dataFrame, specification, row_vars, col_vars)
+        self.fit_dist_thread.fitStatus.connect(self.handleFitStatus)
+        self.fit_dist_thread.finished.connect(self.handleFitFinished)
+        self.fit_dist_thread.start()
+
     def initUI(self, dataframe, row_vars, col_vars, target_vars):
-        self.setWindowIcon(PsyDataFunc.getImageObject("icon.png", type=1))
+        self.setWindowIcon(Func.getImageObject("common/icon.png", type=1))
         self.setWindowTitle("Aggregation Results")
         self.resize(400, 700)
 
@@ -191,10 +218,11 @@ class PivotedDataWidget(QWidget):
             checkVariablesDuplication(row_vars, col_vars, target_vars)
 
             for target_var in target_vars:
-                target_var_name, operation = target_var.split('@')
+                target_var_name, operation, _specification = split_target(target_var)
                 if not pd.api.types.is_numeric_dtype(dataframe[target_var_name]):
                     dataframe[target_var_name] = pd.to_numeric(dataframe[target_var_name], errors='coerce')
 
+            warnConditionWiseFiltering(row_vars, col_vars, dataframe, self.ruleList)
             tmpDataFrame = StatisticTool.filterData(row_vars, col_vars, dataframe, self.ruleList)
 
             if tmpDataFrame.empty:
@@ -207,7 +235,7 @@ class PivotedDataWidget(QWidget):
 
             self.result_frame_var_names = []
             for target_var in target_vars:
-                target_var_name, operation = target_var.split('@')
+                target_var_name, operation, specification = split_target(target_var)
 
                 result = None
                 if operation == 'Mean':
@@ -269,17 +297,26 @@ class PivotedDataWidget(QWidget):
                     self.asynchronous = True
                     self.fitDistInBackground(tmpDataFrame, operation, row_vars, col_vars, target_var_name, operation)
 
-                    # Wait for the fit thread
+                    # waiting until the fit thread is finished
+                    self.process_with_async_wait()
+                elif operation in self.cognitiveFitMethods:
+                    if not specification:
+                        raise ValueError(
+                            f"{target_var_name}@{operation} has no model settings. "
+                            'Double-click the Data item and configure the model first.')
+                    self.asynchronous = True
+                    self.fitCognitiveModelInBackground(
+                        tmpDataFrame, specification, row_vars, col_vars)
                     self.process_with_async_wait()
 
                 """
                 handle concatenate results and result names only for non-fitting methods
                 """
-                if operation not in self.fitMethods:
-                    self.updateResultDataframe(result, target_var)
+                if operation not in self.fitMethods + self.cognitiveFitMethods:
+                    self.updateResultDataframe(result, f'{target_var_name}@{operation}')
 
                 pd.set_option('display.float_format', lambda x: '%.10f' % x)
-                # Generate one script per summary
+                # generate analysis script
                 generateScript(row_vars, col_vars, target_vars, self.ruleList)
 
             if not self.resultList:
@@ -288,7 +325,6 @@ class PivotedDataWidget(QWidget):
                 raise ValueError('No valid results were generated for the current selection.')
 
             self.createResultTable(col_vars, row_vars)
-
         except Exception as e:
             raise Exception(e)
 
@@ -298,60 +334,75 @@ class PivotedDataWidget(QWidget):
         self.timer.start(100)  # 100ms interval
 
     def process_with_async_wait(self):
-        # Run a local event loop
+        # 创建一个事件循环
         loop = QEventLoop()
 
-        # Poll while fitting
+        # 创建定时器用于处理异步操作
         timer = QTimer()
         last_print_time = time.time()
 
         def check_async_status():
             nonlocal last_print_time
 
-            # Stop when fitting completes
+            # 检查是否还在异步状态
             if not self.asynchronous:
-                # Stop polling
+                # 停止定时器
                 timer.stop()
-                # Exit the loop
+                # 退出事件循环
                 loop.quit()
                 return
 
-                # Keep the UI responsive
+                # 处理事件
             QApplication.processEvents()
 
-            # Optional fit heartbeat
+            # 周期性打印（如果需要）
             current_time = time.time()
             if current_time - last_print_time > 1:
                 last_print_time = current_time
                 # print('...')
-                # Optional: PsyDataFunc.printOut("Fitting ...", 0)
+                # 可选：PsyDataFunc.printOut("Fitting ...", 0)
 
-        # Configure polling
-        timer.setInterval(100)  # Poll every 100 ms
+        # 设置定时器间隔和回调
+        timer.setInterval(100)  # 100ms 检查一次
         timer.timeout.connect(check_async_status)
 
-        # Poll until fitting finishes
+        # 启动定时器和事件循环
         timer.start()
         loop.exec_()
 
     def createResultTable(self, col_vars, row_vars):
-        self.table = ResultFrameTableWidget(self.resultList, col_vars, row_vars, self.result_frame_var_names)
+        self.table = ResultFrameTableWidget(
+            self.resultList, col_vars, row_vars, self.result_frame_var_names, self.fit_records)
+        self.table.fitRecordActivated.connect(self.showFitDiagnostics)
 
         self.all_layout.addWidget(self.table)
         self.all_layout.addLayout(self.btns_layout)
         self.setLayout(self.all_layout)
 
-    def handleFitFinished(self, result, target_var, row_vars, col_vars):
+    def handleFitFinished(self, result, target_var, row_vars, col_vars, fit_records):
         if result is not None:
             result = groupby_to_pivot_tables(result, row_vars, col_vars)
             if result:
                 self.updateResultDataframe(result, target_var)
+                self.fit_records.extend(fit_records)
             elif not self.fit_error_message:
                 self.fit_error_message = 'No valid fit results were generated for the current filters.'
 
         self.asynchronous = False
         self.fit_dist_thread.quit()
         self.fit_dist_thread.wait()
+
+    def showFitDiagnostics(self, selected_record=None):
+        """Open fitted PDF and CDF diagnostics for a result-table cell."""
+        if not self.fit_records:
+            return
+        initial_index = 0
+        if selected_record is not None:
+            initial_index = next(
+                (index for index, record in enumerate(self.fit_records) if record is selected_record), 0)
+        self.fit_diagnostics_dialog = RTFitDiagnosticsDialog(
+            self.fit_records, self, initial_index=initial_index)
+        self.fit_diagnostics_dialog.show()
 
     def handleFitStatus(self, infoType: int, infoStr: str, showTime: bool = True):
         if infoType >= 2:
@@ -368,6 +419,12 @@ class PivotedDataWidget(QWidget):
         if numeric_values.empty:
             raise ValueError(
                 f"No valid numeric data remain in '{target_var_name}' after filtering, so {operation} cannot be fitted.")
+        if operation.startswith('Shifted ') and len(numeric_values) < 4:
+            raise ValueError(
+                f"At least four valid observations are required to fit {operation}.")
+        if operation.startswith('Shifted ') and (numeric_values <= 0).any():
+            raise ValueError(
+                f"{operation} requires strictly positive RT observations.")
 
     def updateResultDataframe(self, result, target_var):
         if isinstance(target_var, list):
@@ -385,21 +442,17 @@ class PivotedDataWidget(QWidget):
 
         self.table.updateTable(decimal_places)
 
-    # Collect table data as tab-delimited text
+    # 获取数据
 
     def getTextData(self):
         data = self.filterStr + '\n' + '\n'
         for row in range(self.table.rowCount()):
             for column in range(self.table.columnCount()):
-                item = self.table.item(row, column)
-                if item is not None:
-                    data += item.text() + '\t'
-                else:
-                    data += '\t'
+                data += self.table.cellText(row, column) + '\t'
             data += '\n'
         return data
 
-    # Export the table data
+    # 导出数据
     def exportData(self):
         data = self.getTextData()
         try:
@@ -410,7 +463,7 @@ class PivotedDataWidget(QWidget):
         except Exception as e:
             print(e)
 
-    # Copy the table data to the clipboard
+    # 复制表格内容到剪贴板
     def copyToClipboard(self):
         data = self.getTextData()
 

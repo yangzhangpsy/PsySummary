@@ -2,21 +2,23 @@ import numpy as np
 import pandas as pd
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from app.rtDist import gamma_estimate_x, ex_wald_estimate_x, wald_estimate_x, log_normal_estimate_x, \
-    weibull_estimate_x, ex_gaussian_estimate_x, inverse_gaussian_estimate_x, shifted_inverse_gaussian_estimate_x, \
-    shift_wald_estimate_x
+from app.rtDist import gamma_estimate_x, shifted_gamma_estimate_x, ex_wald_estimate_x, \
+    wald_estimate_x, log_normal_estimate_x, shifted_log_normal_estimate_x, weibull_estimate_x, \
+    shifted_weibull_estimate_x, ex_gaussian_estimate_x, inverse_gaussian_estimate_x, \
+    shifted_inverse_gaussian_estimate_x, shift_wald_estimate_x, FIT_DIAGNOSTIC_NAMES, fit_rt_distribution
 
 
 class FitRTsDistThread(QThread):
     # Signals for reporting fitting status and results
     # infoType, infoString, showTimeInfo or not
     fitStatus = pyqtSignal(int, str, bool)
-    finished = pyqtSignal(object, list, list, list)
+    finished = pyqtSignal(object, list, list, list, object)
 
     # Mapping of distribution names to their configurations
     # Structure: {Display Name: (Internal Name, Parameter Names, Estimation Function)}
     DISTRIBUTION_MAP = {
         'Gamma (k, θ)': (['shape (k)', 'scale (θ)'], gamma_estimate_x),
+        'Shifted Gamma (k, θ, shift)': (['shape (k)', 'scale (θ)', 'shift'], shifted_gamma_estimate_x),
         'Wald (m, a)': (['mean rate (m)', 'response threshold (a)'], wald_estimate_x),
         'Ex-Wald (m, a, τ)': (['mean rate (m)', 'response threshold (a)', 'τ'], ex_wald_estimate_x),
         'Shifted Wald (m, a, shift)': (['mean rate (m)', 'response threshold (a)', 'shift'], shift_wald_estimate_x),
@@ -24,7 +26,10 @@ class FitRTsDistThread(QThread):
         'Inv-Gaussian (μ, λ)': (['mu (μ)', 'lambda (λ)'], inverse_gaussian_estimate_x),
         'Shifted Inv-Gaussian (μ, λ, shift)': (['mu (μ)', 'lambda (λ)', 'shift'], shifted_inverse_gaussian_estimate_x),
         'Weibull (k, θ)': (['shape (k)', 'scale (θ)'], weibull_estimate_x),
-        'LogNormal (k, θ)': (['shape (k)', 'scale (θ)'], log_normal_estimate_x)
+        'Shifted Weibull (k, θ, shift)': (['shape (k)', 'scale (θ)', 'shift'], shifted_weibull_estimate_x),
+        'LogNormal (k, θ)': (['shape (k)', 'scale (θ)'], log_normal_estimate_x),
+        'Shifted LogNormal (k, θ, shift)': (
+            ['shape (k)', 'scale (θ)', 'shift'], shifted_log_normal_estimate_x)
     }
 
     def __init__(self, dataFrame, operation, row_vars, col_vars, independentVarName, distribution, parent=None):
@@ -60,7 +65,7 @@ class FitRTsDistThread(QThread):
         except Exception as e:
             # Emit error status if fitting fails
             self.fitStatus.emit(2, f'Fitting error: {str(e)}', True)
-            self.finished.emit(None, [], self.row_vars, self.col_vars)
+            self.finished.emit(None, [], self.row_vars, self.col_vars, [])
 
     def _process_distribution(self):
         """
@@ -83,11 +88,11 @@ class FitRTsDistThread(QThread):
         dist_key = self.distribution
         if dist_key not in self.DISTRIBUTION_MAP:
             self.fitStatus.emit(2, f'Invalid distribution parameter: {dist_key}.', True)
-            self.finished.emit(None, [], self.row_vars, self.col_vars)
+            self.finished.emit(None, [], self.row_vars, self.col_vars, [])
             return
 
         # Unpack distribution details
-        parameter_names, estimate_func = self.DISTRIBUTION_MAP[dist_key]
+        parameter_names, _estimate_func = self.DISTRIBUTION_MAP[dist_key]
 
         # Special handling for Ex-Wald (known to be slow)
         if 'Wald' in dist_key:
@@ -102,21 +107,54 @@ class FitRTsDistThread(QThread):
         group_vars = self.row_vars + self.col_vars
 
         # Perform estimation (with or without grouping)
+        fit_records = []
+
+        def fit_group(series):
+            fit = fit_rt_distribution(series, dist_key)
+            group_value = series.name
+            if not isinstance(group_value, tuple):
+                group_value = (group_value,)
+            fit['group_values'] = group_value if group_vars else ()
+            fit['group_vars'] = list(group_vars)
+            fit['result_prefix'] = f'{self.independentVarName}@{self.operation}'
+            fit_records.append(fit)
+            diagnostics = [
+                fit['n_valid'],
+                'Yes' if fit['converged'] else 'No',
+                fit['parameter_boundary'],
+                fit['shift_warning'],
+                fit['log_likelihood'],
+                fit['aic'],
+                fit['bic'],
+            ]
+            group_label = 'Overall' if not group_vars else ', '.join(
+                f'{name}={value}' for name, value in zip(group_vars, group_value))
+            self.fitStatus.emit(
+                0,
+                f"Fit diagnostics [{group_label}]: Converged={'Yes' if fit['converged'] else 'No'}; "
+                f"N valid={fit['n_valid']}; Parameter boundary={fit['parameter_boundary']} "
+                f"({fit['boundary_details']}); Shift warning={fit['shift_warning']} "
+                f"({fit['shift_warning_details']}); optimizer={fit['message']}",
+                False,
+            )
+            return np.asarray(list(fit['parameters']) + diagnostics, dtype=object)
+
         if group_vars:
             # Grouped estimation
-            grouped_result = prepared_frame.groupby(group_vars)[self.independentVarName].apply(estimate_func)
+            grouped_result = prepared_frame.groupby(group_vars)[self.independentVarName].apply(fit_group)
         else:
             # Single estimation
-            grouped_result = pd.Series({'result': estimate_func(prepared_frame[self.independentVarName])})
+            grouped_result = pd.Series({'result': fit_group(prepared_frame[self.independentVarName])})
 
         if grouped_result.empty:
             raise ValueError('No fit results were generated for the current filters.')
 
-            # Generate fully qualified parameter names
-        full_parameter_names = [f"{self.independentVarName}@{self.operation} {item}" for item in parameter_names]
+        # Generate fully qualified parameter names
+        output_names = parameter_names + FIT_DIAGNOSTIC_NAMES
+        full_parameter_names = [f"{self.independentVarName}@{self.operation} {item}" for item in output_names]
 
         # Emit final results
-        self.finished.emit(grouped_result, full_parameter_names, self.row_vars, self.col_vars)
+        self.finished.emit(grouped_result, full_parameter_names, self.row_vars, self.col_vars, fit_records)
 
     def _prepare_fit_dataframe(self):
         required_columns = []

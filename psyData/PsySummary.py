@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import csv
-import platform
+import ast
 import sys
 import traceback
 import re
@@ -10,29 +10,34 @@ import numpy as np
 import pandas as pd
 from scipy.io import matlab
 
-from PyQt5.QtCore import Qt, QEvent
+from PyQt5.QtCore import Qt, QEvent, QSettings
 from PyQt5.QtWidgets import QApplication, QFileDialog, \
-    QHBoxLayout, QGridLayout, QLabel, QVBoxLayout, QPushButton, QMenu, QWidget, QMainWindow, QMessageBox, QAction
+    QHBoxLayout, QGridLayout, QLabel, QVBoxLayout, QPushButton, QMenu, QWidget, QMainWindow, QMessageBox, QAction, \
+    QActionGroup, QDockWidget
 from PyQt5.QtGui import QKeySequence
-
-from app.lib import DecodingFiles, DraggableListWidget, VariableDraggableListWidget, MainFilterListWidget
-from app.lib import ImportMatThread
-from app.lib import MessageBox
-from app.lib import FilterWindow
-from app.lib import DataFrameTableWidget
-from app.lib import PivotedDataWidget
-from app.lib import ScriptDock
-
+from app.func import Func
+from app.info import Info
+from app.lib import MessageBox, Settings
+from app.lib.decoding_files import DecodingFiles
+from app.lib.import_mat_thread import ImportMatThread
+from app.lib.source_file import addSourceFileColumn
+from app.lib.draggablelistwidget import DraggableListWidget, MainFilterListWidget, \
+    VariableDraggableListWidget, MODEL_SPEC_ROLE
+from app.lib.filterWindow import FilterWindow
+from app.lib.dataFrameTableWidget import DataFrameTableWidget
+from app.lib.distributionPreview import DistributionPreviewDialog
+from app.lib.pivotedDataWidget import PivotedDataWidget
 from app.psyDataFunc import PsyDataFunc
 from app.psyDataInfo import PsyDataInfo
-
+from app.lib.scriptDock import ScriptDock
 from app.tool import StatisticTool, FlashMessageBox
 from app.variableCompute import VariableCompute
+from app.output import Output
 
 
 def setListWidgetData(widget, items):
     if hasattr(widget, 'contentList'):
-        widget.contentList = items
+        widget.contentList = list(items)
         # False to keep the content list untouched
         widget.clear(False)
     else:
@@ -46,23 +51,33 @@ def getListWidgetData(widget):
     return [widget.item(i).text() for i in range(widget.count())]
 
 
+def getDataListEntries(widget):
+    """Return Data targets while preserving structured cognitive-model settings."""
+    entries = []
+    for index in range(widget.count()):
+        item = widget.item(index)
+        specification = item.data(MODEL_SPEC_ROLE)
+        entries.append({'model_specification': specification} if specification else item.text())
+    return entries
+
+
 def parseStringToList(string):
     start_index = string.find(": ")
 
     if start_index != -1:
-        list_string = string[start_index + 2:]
-
-        filter_list = eval(list_string)
-
+        list_string = string[start_index + 2:]  # 提取包含列表的部分
+        # 使用 eval() 函数解析字符串并转换为列表
+        filter_list = ast.literal_eval(list_string)
+        # 输出转换后的列表
         return filter_list
     else:
         return None
 
 
 def fixColumnName(name, shouldStartWithLetter: bool = False):
-
+    # 去掉不符合规则的字符，仅保留合法字符
     fixed_name = ''.join(re.findall(r'[a-zA-Z0-9_\-.]', name))
-
+    # 确保列名以字母开头
     if shouldStartWithLetter:
         if not fixed_name or not re.match(r'^[a-zA-Z]', fixed_name):
             fixed_name = 'col' + fixed_name  # 添加前缀以满足规则
@@ -112,32 +127,30 @@ class PsyData(QMainWindow):
         super().__init__()
 
         # self.plugin_mode = not __name__ == "__main__"
-        self.files = None
         self.plugin_mode = False
         self.readMatThreads = dict()
         self.pivotTableWindow = None
         self.filterWindow = None
+        self.distributionPreviewWindow = None
         self.tableFrame = None
         self.variablesNameList = None
         self.import_file = None
         self.data = pd.DataFrame()
         self.dataReadStart = False
-
-        self.is_windows = platform.system() == "Windows"
-
+        self.is_windows = Info.OS_TYPE == 0
+        self.files = None
         self.lst = [None, ' ']
         self.analysisScript = []
-        self.FILE_DIRECTORY = ''
 
         PsyDataInfo.PsyData = self
 
         if self.plugin_mode:
-            self.resize(800, 700)
+            self.resize(980, 700)
         else:
-            self.resize(800, 700)
+            self.resize(980, 700)
 
         self.setWindowTitle('Data Summary')
-        self.setWindowIcon(PsyDataFunc.getImageObject("icon.png", type=1))
+        self.setWindowIcon(Func.getImageObject("common/icon.png", type=1))
         # set the central widget
         self.central_widget = QWidget()
         self.computationVariableGui = VariableCompute(self.data)
@@ -152,6 +165,9 @@ class PsyData(QMainWindow):
         tool_menu: QMenu = menubar.addMenu("&Toolbox")
 
         file_menu.addAction("Load Data", self.loadDataFile, QKeySequence(QKeySequence.Open))
+        self.open_recent_menu = file_menu.addMenu("Open Recent")
+        self.open_recent_menu.aboutToShow.connect(self.refreshOpenRecentMenu)
+        self.refreshOpenRecentMenu()
         file_menu.addAction("View Data", self.showDataTable, QKeySequence(QKeySequence.WhatsThis))
         file_menu.addAction("Save Data", self.savePsyData, QKeySequence(QKeySequence.Save))
         file_menu.addAction("Save Filtered Data", self.saveFilteredData, QKeySequence(QKeySequence.SaveAs))
@@ -170,7 +186,7 @@ class PsyData(QMainWindow):
         self.script_action.setData("script")
 
         if self.is_windows:
-            checked_icon = PsyDataFunc.getImageObject("checked", 1)
+            checked_icon = Func.getImageObject("menu/checked", 1)
             self.script_action.setIcon(checked_icon)
             self.script_action.setIconVisibleInMenu(True)
         else:
@@ -182,11 +198,7 @@ class PsyData(QMainWindow):
         """
         # output dock and action
         """
-        """
-        # output dock and action
-        """
         if not self.plugin_mode:
-            from app.output import Output
             self.output = Output(True)
             self.addDockWidget(Qt.BottomDockWidgetArea, self.output)
             self.output.realVisibleChanged.connect(self.setActionIcon)
@@ -195,9 +207,10 @@ class PsyData(QMainWindow):
             self.output_action.setData("output")
 
             if self.is_windows:
-                checked_icon = PsyDataFunc.getImageObject("checked", 1)
+                checked_icon = Func.getImageObject("menu/checked", 1)
                 self.output_action.setIcon(checked_icon)
-
+                # self.output_action.setCheckable(True)
+                # self.output_action.setChecked(True)
                 self.output_action.setIconVisibleInMenu(True)
             else:
                 self.output_action.setCheckable(True)
@@ -212,6 +225,7 @@ class PsyData(QMainWindow):
             self.output.setFocus()
 
             view_menu.addAction(self.output_action)
+
         view_menu.addAction(self.script_action)
 
         #  lists
@@ -227,12 +241,29 @@ class PsyData(QMainWindow):
 
         # buttons
         self.filter_button = QPushButton('Define Filters')
-        self.save_filter_button = QPushButton('Save Filter')
-        self.load_filter_button = QPushButton('Load Filter')
-        self.run_button = QPushButton('Run')
+        self.filter_button.setToolTip(
+            'Create or edit the filtering rules used for preview, export, and analysis.')
+        self.distribution_preview_button = QPushButton('Preview Filter Effects')
+        self.distribution_preview_button.setToolTip(
+            'Compare distributions before and after applying the current filters.')
+        self.export_filtered_button = QPushButton('Export Filtered Data')
+        self.export_filtered_button.setToolTip(
+            'Save retained rows without changing the currently loaded data.')
+        self.save_filter_button = QPushButton('Save Setup')
+        self.save_filter_button.setToolTip(
+            'Save the current Rows, Columns, Data, and Filters configuration.')
+        self.load_filter_button = QPushButton('Load Setup')
+        self.load_filter_button.setToolTip(
+            'Load a previously saved PsySummary configuration.')
+        # A doubled ampersand renders one literal ampersand instead of a Qt mnemonic.
+        self.run_button = QPushButton('Apply Filters && Run')
+        self.run_button.setToolTip(
+            'Apply the current filters to the original data and run the selected analysis.')
         self.close_button = QPushButton('Close')
 
         self.filter_button.clicked.connect(self.defineFilterEvent)
+        self.distribution_preview_button.clicked.connect(self.showDistributionPreview)
+        self.export_filtered_button.clicked.connect(self.saveFilteredData)
         self.save_filter_button.clicked.connect(self.saveFilterEvent)
         self.load_filter_button.clicked.connect(self.loadFilterEvent)
         self.run_button.clicked.connect(self.runSummary)
@@ -258,7 +289,11 @@ drag the variable back to the variable list.
         buttons_layout.addWidget(self.filter_button, 1)
         buttons_layout.addWidget(self.save_filter_button, 1)
         buttons_layout.addWidget(self.load_filter_button, 1)
+        buttons_layout.addSpacing(10)
+        buttons_layout.addWidget(self.distribution_preview_button, 1)
+        buttons_layout.addWidget(self.export_filtered_button, 1)
         buttons_layout.addWidget(self.run_button, 1)
+        buttons_layout.addSpacing(10)
         buttons_layout.addWidget(self.close_button, 1)
         buttons_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -334,38 +369,101 @@ drag the variable back to the variable list.
         options = QFileDialog.Options()
         # options |= QFileDialog.DontUseNativeDialog
 
-        if self.FILE_DIRECTORY:
-            default_dir = self.FILE_DIRECTORY
+        if Info.FILE_DIRECTORY:
+            default_dir = Info.FILE_DIRECTORY
         else:
-            default_dir = os.path.expanduser('~')
+            default_dir = Info.UserPath
 
         files, _ = QFileDialog.getOpenFileNames(self, "Select File(s)", default_dir,
                                                 "Matlab Files (*.mat);;Text Files (*.txt);;Text Files (*.csv);;Dat Files (*.dat);;psyData Files (*.psydata)",
                                                 options=options)
 
         if files:
-            try:
-                self.files = files
-                _, file_extension = os.path.splitext(files[0])
+            self.openDataFiles(files)
 
-                if file_extension == '.txt' or file_extension == '.dat' or file_extension == '.csv':
-                    self.import_file = DecodingFiles(files)
-                    self.import_file.ok_btn.clicked.connect(self.decodingFileOKPressedEvent)
-                    self.import_file.show()
-                elif file_extension == '.mat':
-                    # clear it first
-                    # self.data = pd.DataFrame()
-                    self.readMatlabFilesMThread(files)
-                    # self.clearAllListAndSetData()
-                elif file_extension == '.psydata':
-                    self.data = readPsyDataFiles(files)
-                    self.clearAllListAndSetData()
+    @staticmethod
+    def normalizeRecentFilePaths(file_paths):
+        """Normalize QSettings and dialog file-path values to a string list."""
+        if isinstance(file_paths, (str, bytes)):
+            file_paths = [file_paths]
+        elif not isinstance(file_paths, list):
+            file_paths = list(file_paths) if file_paths else []
+        return [
+            os.path.abspath(os.path.expanduser(os.fsdecode(file_path)))
+            for file_path in file_paths
+            if isinstance(file_path, (str, bytes)) and file_path
+        ]
 
-                self.FILE_DIRECTORY = os.path.dirname(files[0])
+    def openDataFiles(self, files):
+        """Open one or more supported data files through the normal import workflow."""
+        files = self.normalizeRecentFilePaths(files)
+        if not files:
+            return
+        try:
+            self.files = files
+            _, file_extension = os.path.splitext(files[0])
+            file_extension = file_extension.lower()
 
-            except Exception as e:
-                msg_box = FlashMessageBox('Flash Message', str(e))
-                msg_box.show()
+            if file_extension in {'.txt', '.dat', '.csv'}:
+                self.import_file = DecodingFiles(files, add_source_file=True)
+                self.import_file.ok_btn.clicked.connect(self.decodingFileOKPressedEvent)
+                self.import_file.finalDataReady.connect(self.decodingFileDataReady)
+                self.import_file.show()
+            elif file_extension == '.mat':
+                self.readMatlabFilesMThread(files)
+            elif file_extension == '.psydata':
+                self.data = readPsyDataFiles(files)
+                self.clearAllListAndSetData()
+                self.updateRecentFiles(files)
+            else:
+                raise ValueError(f"Unsupported data file type: {file_extension or 'no extension'}")
+        except Exception as e:
+            msg_box = FlashMessageBox('Flash Message', str(e))
+            msg_box.show()
+
+    def updateRecentFiles(self, file_paths):
+        """Add successfully opened data files to PsySummary's recent-file history."""
+        new_paths = self.normalizeRecentFilePaths(file_paths)
+        settings = Settings(Info.ConfigFile, QSettings.IniFormat)
+        recent_paths = self.normalizeRecentFilePaths(
+            settings.value('psysummary_recent_files', []))
+        for file_path in reversed(new_paths):
+            if file_path in recent_paths:
+                recent_paths.remove(file_path)
+            recent_paths.insert(0, file_path)
+        settings.setValue('psysummary_recent_files', recent_paths[:20])
+        if hasattr(self, 'open_recent_menu'):
+            self.refreshOpenRecentMenu()
+
+    def refreshOpenRecentMenu(self):
+        """Rebuild PsySummary's Open Recent submenu from its data-file history."""
+        self.open_recent_menu.clear()
+        settings = Settings(Info.ConfigFile, QSettings.IniFormat)
+        recent_paths = self.normalizeRecentFilePaths(
+            settings.value('psysummary_recent_files', []))
+
+        if recent_paths:
+            for file_path in recent_paths[:20]:
+                action = self.open_recent_menu.addAction(file_path)
+                action.setToolTip(file_path)
+                action.setEnabled(os.path.isfile(file_path))
+                if action.isEnabled():
+                    action.triggered.connect(
+                        lambda checked=False, recent_file=file_path: self.openDataFiles([recent_file]))
+            self.open_recent_menu.addSeparator()
+        else:
+            empty_action = self.open_recent_menu.addAction('No Recent Files')
+            empty_action.setEnabled(False)
+            self.open_recent_menu.addSeparator()
+
+        clear_action = self.open_recent_menu.addAction('Clear Items')
+        clear_action.setEnabled(bool(recent_paths))
+        clear_action.triggered.connect(self.clearRecentFiles)
+
+    def clearRecentFiles(self):
+        """Clear PsySummary's recent data-file history."""
+        Settings(Info.ConfigFile, QSettings.IniFormat).setValue('psysummary_recent_files', [])
+        self.refreshOpenRecentMenu()
 
     def readMatlabFilesMThread(self, fileList):
         """
@@ -424,6 +522,7 @@ drag the variable back to the variable list.
                 self.dataReadStart = True
 
             self.data = pd.concat([self.data, data], ignore_index=True)
+            self.updateRecentFiles(fileList)
 
         self.readMatThreads[fileType].wait()
         PsyDataFunc.genScript(PsyDataFunc.list2Script(fileList, 'fileList'))
@@ -438,17 +537,25 @@ drag the variable back to the variable list.
             self.clearAllListAndSetData()
 
     def decodingFileOKPressedEvent(self):
-        self.data = self.import_file.readFinalData()
+        self.import_file.readFinalData()
 
+    def decodingFileDataReady(self, data):
+        """Apply imported data after background file reading."""
+        self.data = data
+        for file_path in self.import_file.files:
+            self.printLogInfo(f"Reading file: {file_path}", 0)
+        self.updateRecentFiles(self.import_file.files)
         self.import_file.acceptEvent()
         self.clearAllListAndSetData()
 
         text_format, delimiter = self.import_file.getFormatAndDelimiter()
         PsyDataFunc.genScript(PsyDataFunc.list2Script(self.import_file.files, 'fileList'))
-        PsyDataFunc.genScript(
-            f"aggData.readDatFiles(fileList, {self.import_file.getContainHeadStatus()},'{text_format}', '{delimiter}')")
+        PsyDataFunc.genScript(f"aggData.readDatFiles(fileList, {self.import_file.getContainHeadStatus()},'{text_format}', '{delimiter}')")
 
     def clearAllListAndSetData(self):
+        if self.data is None:
+            return
+
         self.dataReadStart = False
         self.clearAllList()
 
@@ -504,14 +611,15 @@ drag the variable back to the variable list.
     # 读取多个文件
     def readMultipleFiles(self, fileList):
         all_dfs = []
+        loaded_files = []
         try:
             for file in fileList:
                 df = self.readFile(file)
-                fileName = os.path.basename(file)
-                df = df.assign(fileName=fileName)
                 if df is not None:
                     all_dfs.append(df)
+                    loaded_files.append(file)
             if all_dfs:
+                all_dfs, _source_column = addSourceFileColumn(all_dfs, loaded_files)
                 return pd.concat(all_dfs, ignore_index=True)
             else:
                 return None
@@ -532,6 +640,7 @@ drag the variable back to the variable list.
             self.variablesNameList = self.data.columns.tolist()
             self.variables_list.addItems(self.variablesNameList)
             self.variables_list.sortItems(Qt.AscendingOrder)
+            self.data_list.setModelContext(self.data, self.getFilteredDataFrame)
 
     # 显示打开文件的table
     def showDataTable(self):
@@ -554,7 +663,58 @@ drag the variable back to the variable list.
             return False
         # try:
         self.filterWindow = FilterWindow(self.data, self.filter_list)
+        self.filterWindow.previewRequested.connect(self.showDistributionPreview)
         self.filterWindow.show()
+
+    def showDistributionPreview(self):
+        """Open a before/after visualization using the active PsySummary filters."""
+        if self.data is None or self.data.empty:
+            MessageBox.information(self, 'Warning', 'No data exist, please load data first.')
+            return False
+        try:
+            row_variables = getListWidgetData(self.rows_list)
+            column_variables = getListWidgetData(self.columns_list)
+            data_items = getListWidgetData(self.data_list)
+            target_variables = []
+            for item in data_items:
+                variable = item.split('@', 1)[0]
+                if (variable not in target_variables and variable in self.data.columns
+                        and pd.to_numeric(self.data[variable], errors='coerce').notna().any()):
+                    target_variables.append(variable)
+            if not target_variables:
+                MessageBox.information(
+                    self,
+                    'Warning',
+                    'No numeric Data variable is defined. Drag at least one numeric variable into '
+                    'the Data area before opening Distribution Preview.')
+                return False
+
+            rules = self.getFilterList()
+            marker = '__psysummary_preview_row_id__'
+            while marker in self.data.columns:
+                marker += '_'
+
+            preview_source = self.data.copy()
+            preview_source[marker] = np.arange(len(preview_source), dtype=int)
+            retained_data = StatisticTool.filterData(
+                row_variables, column_variables, preview_source, rules)
+            retained_ids = set(retained_data[marker].astype(int).tolist())
+            retained_mask = preview_source[marker].isin(retained_ids).to_numpy(dtype=bool)
+            preview_source = preview_source.drop(columns=[marker])
+
+            self.distributionPreviewWindow = DistributionPreviewDialog(
+                preview_source,
+                retained_mask,
+                target_variables=target_variables,
+                row_facets=row_variables,
+                column_facets=column_variables,
+                parent=self,
+            )
+            self.distributionPreviewWindow.show()
+            return True
+        except Exception as error:
+            MessageBox.warning(self, 'Distribution Preview Error', str(error))
+            return False
 
     # 运行分析程序
     def runSummary(self):
@@ -565,7 +725,7 @@ drag the variable back to the variable list.
         try:
             rowList = getListWidgetData(self.rows_list)
             columnList = getListWidgetData(self.columns_list)
-            dataList = getListWidgetData(self.data_list)
+            dataList = getDataListEntries(self.data_list)
 
             if not dataList:
                 MessageBox.information(
@@ -606,6 +766,8 @@ drag the variable back to the variable list.
             self.filterWindow.close()
         if self.computationVariableGui:
             self.computationVariableGui.close()
+        if self.distributionPreviewWindow:
+            self.distributionPreviewWindow.close()
         super().closeEvent(event)
 
     def getGlobalPosition(self):
@@ -638,10 +800,16 @@ drag the variable back to the variable list.
                     columnList = parseStringToList(columnListString)
                     dataList = parseStringToList(dataListString)
                     filterList = parseStringToList(filterListString)
+                    modelSpecifications = {}
+                    for line in lines[4:]:
+                        if line.startswith('modelSpecifications:'):
+                            modelSpecifications = parseStringToList(line) or {}
+                            break
 
                     setListWidgetData(self.rows_list, rowList)
                     setListWidgetData(self.columns_list, columnList)
                     setListWidgetData(self.data_list, dataList)
+                    self.data_list.restoreModelSpecifications(modelSpecifications)
                     setListWidgetData(self.filter_list, filterList)
 
         except Exception as e:
@@ -661,30 +829,44 @@ drag the variable back to the variable list.
         return items
 
     def getFilteredDataFrame(self):
-        df = self.data
-
+        """Return retained rows without replacing the currently loaded data."""
         items = self.getFilterList()
 
-        if len(items) != 0:
+        if items:
             rowList = getListWidgetData(self.rows_list)
             columnList = getListWidgetData(self.columns_list)
-
-            df = StatisticTool.filterData(rowList, columnList, self.data, items)
-        return df
+            # filterData owns the one defensive working copy needed to keep self.data unchanged.
+            return StatisticTool.filterData(rowList, columnList, self.data, items)
+        # Export and the read-only data viewer do not mutate the loaded DataFrame.
+        return self.data
 
     # 保存预设的.psydata文件
     def saveFilteredData(self):
-        df = self.getFilteredDataFrame()
+        filtered_copy = self.getFilteredDataFrame()
 
         try:
-            file_path, _ = QFileDialog.getSaveFileName(self, 'Save File', '', 'psyData Files (*.psydata)')
+            file_path, selected_filter = QFileDialog.getSaveFileName(
+                self,
+                'Save Filtered Data',
+                '',
+                'CSV Files (*.csv);;psyData Files (*.psydata)')
             if file_path:
-                df.to_csv(file_path, sep='|', quoting=csv.QUOTE_NONNUMERIC, index=False, header=True)
-                # filterDataOnly(self, row_vars, col_vars, ruleList):
-                PsyDataFunc.genScript(
-                    f"filteredDataFrame = aggData.filterData(rowVariables, colVariables, ruleList, cdfPoolingOmegas)")
-                PsyDataFunc.genScript(
-                    f"filteredDataFrame.to_csv('{file_path}', sep='|', quoting=csv.QUOTE_NONNUMERIC, index=False, header=True)")
+                extension = os.path.splitext(file_path)[1].lower()
+                if extension not in {'.csv', '.psydata'}:
+                    extension = '.psydata' if 'psyData' in selected_filter else '.csv'
+                    file_path += extension
+
+                PsyDataFunc.genScript(f"filteredDataFrame = aggData.filterData(rowVariables, colVariables, ruleList, cdfPoolingOmegas)")
+                if extension == '.csv':
+                    filtered_copy.to_csv(file_path, index=False, header=True)
+                    PsyDataFunc.genScript(
+                        f"filteredDataFrame.to_csv({file_path!r}, index=False, header=True)")
+                else:
+                    filtered_copy.to_csv(
+                        file_path, sep='|', quoting=csv.QUOTE_NONNUMERIC, index=False, header=True)
+                    PsyDataFunc.genScript(
+                        f"filteredDataFrame.to_csv({file_path!r}, sep='|', quoting=csv.QUOTE_NONNUMERIC, "
+                        f"index=False, header=True)")
         except Exception as e:
             self.printLogInfo(f"Error in saving filtered data:{e}", 3)
             return None
@@ -699,8 +881,7 @@ drag the variable back to the variable list.
                 # 将数组数据保存到文件中
                 self.data.to_csv(file_path, sep='|', quoting=csv.QUOTE_NONNUMERIC, index=False, header=True)
 
-                PsyDataFunc.genScript(
-                    f"aggData.data.to_csv('{file_path}', sep='|', quoting=csv.QUOTE_NONNUMERIC, index=False, header=True)")
+                PsyDataFunc.genScript(f"aggData.data.to_csv('{file_path}', sep='|', quoting=csv.QUOTE_NONNUMERIC, index=False, header=True)")
         except Exception as e:
             self.printLogInfo(f"Error in saving file:{e}", 3)
             return None
@@ -710,6 +891,7 @@ drag the variable back to the variable list.
         columnList = getListWidgetData(self.columns_list)
         rowList = getListWidgetData(self.rows_list)
         dataList = getListWidgetData(self.data_list)
+        modelSpecifications = self.data_list.modelSpecifications()
         filterList = getListWidgetData(self.filter_list)
 
         if self.data is None:
@@ -724,13 +906,17 @@ drag the variable back to the variable list.
                     file.write(f'columnList: {columnList}\n')
                     file.write(f'dataList: {dataList}\n')
                     file.write(f'filterList: {filterList}\n')
+                    file.write(f'modelSpecifications: {modelSpecifications!r}\n')
         except Exception as e:
             MessageBox.warning(self, "Save file error", f"{e}")
             return None
 
     # @staticmethod
     def printLogInfo(self, infoText, infoType: int = 0):
-        PsyDataFunc.printOut(infoText, infoType)
+        if self.plugin_mode:
+            Func.printOut(infoText, infoType)
+        else:
+            PsyDataFunc.printOut(infoText, infoType)
 
     def handleThreadSignal(self, infoType: int, infoText: str):
         self.printLogInfo(infoText, infoType)

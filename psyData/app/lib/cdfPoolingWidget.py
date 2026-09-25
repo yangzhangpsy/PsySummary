@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout, QPushButton, QDialog, QTextEdit, QFrame
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
-from app.psyDataFunc import PsyDataFunc
+from app.func import Func
 
 
 def outlier_mode_lnlike(params, cdf_values):
@@ -60,7 +60,7 @@ class CdfPoolingWidget(QDialog):
         self.omega_hat = omega_hat
         self.original_omega = omega_hat
         self.setWindowTitle('CDF Pooling Model Fit')
-        self.setWindowIcon(PsyDataFunc.getImageObject("icon.png", type=1))
+        self.setWindowIcon(Func.getImageObject("common/icon.png", type=1))
         self.setWindowModality(Qt.ApplicationModal)
 
         self.canvas = MplCanvas(cdf_data, po_hat, omega_hat)
@@ -168,19 +168,19 @@ class MplCanvas(FigureCanvas):
 
     def on_mouse_move(self, event):
         if event.inaxes == self.ax and 0 <= event.xdata <= 1:
-            # Show crosshairs when the mouse is within range
+            # 鼠标在范围内时显示十字线
             self.cross_hair_v.set_visible(True)
             self.cross_hair_h.set_visible(True)
             self.text_annotation.set_visible(True)
 
             self.cross_hair_v.set_xdata([event.xdata, event.xdata])
             self.cross_hair_h.set_ydata([event.ydata, event.ydata])
-            # Use axes coordinates (relative coordinates) to keep the annotation inside the figure
+            # 使用axes坐标 (相对坐标系)，避免注释超出图像范围
             inv = self.ax.transAxes.inverted()
             ax_coord = inv.transform(self.ax.transData.transform((event.xdata, np.maximum(event.ydata, 1 - self.po_hat))))
             ax_x, ax_y = ax_coord
 
-            # Keep the annotation fully visible in the figure
+            # 限制注释在图中显示完整
             ax_x = np.clip(ax_x + 0.02, 0.01, 0.85)
             ax_y = np.clip(ax_y + 0.02, 0.01, 0.95)
 
@@ -190,7 +190,7 @@ class MplCanvas(FigureCanvas):
             self.text_annotation.set_text(f"ω: {event.xdata:.4f}")
 
         else:
-            # Hide crosshairs when the mouse leaves the range
+            # 鼠标超出范围隐藏十字线
             self.cross_hair_v.set_visible(False)
             self.cross_hair_h.set_visible(False)
             self.text_annotation.set_visible(False)

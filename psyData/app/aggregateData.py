@@ -1,4 +1,3 @@
-import ast
 import csv
 import os
 import re
@@ -12,9 +11,73 @@ from scipy.io import loadmat
 from scipy.optimize import minimize
 from scipy.stats import boxcox
 
-from .rtDist import gamma_estimate_x, wald_estimate_x, ex_wald_estimate_x, ex_gaussian_estimate_x, \
-    inverse_gaussian_estimate_x, shifted_inverse_gaussian_estimate_x, weibull_estimate_x, log_normal_estimate_x, \
-    shift_wald_estimate_x, CDF_pooling_main
+from .rtDist import gamma_estimate_x, shifted_gamma_estimate_x, wald_estimate_x, ex_wald_estimate_x, \
+    ex_gaussian_estimate_x, inverse_gaussian_estimate_x, shifted_inverse_gaussian_estimate_x, \
+    weibull_estimate_x, shifted_weibull_estimate_x, log_normal_estimate_x, shifted_log_normal_estimate_x, \
+    shift_wald_estimate_x, CDF_pooling_main, FIT_DIAGNOSTIC_NAMES, fit_rt_distribution_values
+from .cognitiveModels import fit_cognitive_model
+from .cognitiveModelSpec import (
+    COGNITIVE_MODEL_NAMES, cognitive_model_reference_text, split_target,
+)
+from .expression import evaluate_aggregate_expression
+
+
+def runBoxcox(values):
+    transformed, _optimal_lambda = boxcox(values)
+    return transformed
+
+
+CONDITION_WISE_FILTER_REFERENCE = (
+    'André, Q. (2022). Outlier exclusion procedures must be blind to the researcher\'s hypothesis. '
+    'Journal of Experimental Psychology: General, 151(1), 213–223. '
+    'https://doi.org/10.1037/xge0001069'
+)
+SOURCE_FILE_COLUMN = 'source_file'
+
+
+def mapDataFrameElements(dataFrame, function):
+    """Apply a scalar function with both current and legacy pandas versions."""
+    mapper = getattr(dataFrame, 'map', None)
+    if mapper is None:
+        mapper = dataFrame.applymap
+    return mapper(function)
+
+
+def addSourceFileColumn(
+        data_frames,
+        file_paths,
+        preferred_name=SOURCE_FILE_COLUMN,
+        existing_source_columns=(),
+):
+    """Add a source filename column only when imported data do not already contain one."""
+    frames = list(data_frames)
+    paths = list(file_paths)
+    if len(frames) != len(paths):
+        raise ValueError('Each imported data frame must have one matching source file path.')
+    recognized_columns = (preferred_name,) + tuple(existing_source_columns)
+    for frame, file_path in zip(frames, paths):
+        if not any(column in frame.columns for column in recognized_columns):
+            frame[preferred_name] = os.path.basename(os.fsdecode(file_path))
+    return frames, preferred_name
+
+
+def warnConditionWiseFiltering(row_var_list, column_var_list, data_frame, rule_list):
+    """Print a warning when active filters are combined with multiple observed data cells."""
+    grouping_variables = list(dict.fromkeys(list(row_var_list) + list(column_var_list)))
+    if not rule_list or not grouping_variables:
+        return 0
+    combination_count = int(data_frame[grouping_variables].drop_duplicates().shape[0])
+    if combination_count > 1:
+        grouping_label = ' × '.join(grouping_variables)
+        print(
+            'WARNING: Potential condition-wise filtering: The current Rows × Columns settings define '
+            f'{combination_count} observed data cells ({grouping_label}) while filters are active. '
+            'Any exclusion criterion estimated within these cells is applied separately by condition, '
+            'which can exaggerate between-condition differences. Consider computing exclusion criteria '
+            'blind to the experimental condition (for example, within participant but collapsed across '
+            f'conditions). Reference: {CONDITION_WISE_FILTER_REFERENCE}'
+        )
+    return combination_count
 
 
 def isCompareCond(expression: str):
@@ -42,119 +105,6 @@ def executeDataFilter(dataFrame, variableName: str, compareType: str, value):
 
 def contains_empty_list(x):
     return any(hasattr(item, '__len__') and len(item) == 0 for item in x)
-
-
-def runBoxcox(df):
-    df, optimal_lambda = boxcox(df)
-    return df
-
-
-def getAttributeChain(node):
-    parts = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-
-    if isinstance(node, ast.Name):
-        parts.append(node.id)
-        return ".".join(reversed(parts))
-    return None
-
-
-class AggregateDataExpressionValidator(ast.NodeVisitor):
-    allowedCalls = {'runBoxcox', 'np.log', 'np.exp', 'np.logical_and', 'np.logical_or'}
-    allowedAttributes = {'self.data', 'np.log', 'np.exp', 'np.logical_and', 'np.logical_or'}
-    allowedNames = {'self', 'np', 'runBoxcox'}
-    allowedBinaryOperators = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.BitAnd, ast.BitOr)
-    allowedUnaryOperators = (ast.UAdd, ast.USub, ast.Invert)
-    allowedCompareOperators = (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)
-
-    def generic_visit(self, node):
-        raise ValueError(f"Unsupported expression element: {type(node).__name__}")
-
-    def visit_Expression(self, node):
-        self.visit(node.body)
-
-    def visit_Name(self, node):
-        if node.id not in self.allowedNames:
-            raise ValueError(f"Unsupported name in expression: {node.id}")
-
-    def visit_Attribute(self, node):
-        attribute_chain = getAttributeChain(node)
-        if attribute_chain not in self.allowedAttributes:
-            raise ValueError(f"Unsupported attribute access in expression: {attribute_chain}")
-
-    def visit_Constant(self, node):
-        return None
-
-    def visit_List(self, node):
-        for element in node.elts:
-            self.visit(element)
-
-    def visit_Tuple(self, node):
-        for element in node.elts:
-            self.visit(element)
-
-    def visit_Subscript(self, node):
-        self.visit(node.value)
-        self.visit(node.slice)
-
-    def visit_Slice(self, node):
-        if node.lower is not None:
-            self.visit(node.lower)
-        if node.upper is not None:
-            self.visit(node.upper)
-        if node.step is not None:
-            self.visit(node.step)
-
-    def visit_BinOp(self, node):
-        if not isinstance(node.op, self.allowedBinaryOperators):
-            raise ValueError(f"Unsupported operator in expression: {type(node.op).__name__}")
-        self.visit(node.left)
-        self.visit(node.right)
-
-    def visit_UnaryOp(self, node):
-        if not isinstance(node.op, self.allowedUnaryOperators):
-            raise ValueError(f"Unsupported unary operator in expression: {type(node.op).__name__}")
-        self.visit(node.operand)
-
-    def visit_Compare(self, node):
-        self.visit(node.left)
-        for operator in node.ops:
-            if not isinstance(operator, self.allowedCompareOperators):
-                raise ValueError(f"Unsupported comparison operator in expression: {type(operator).__name__}")
-        for comparator in node.comparators:
-            self.visit(comparator)
-
-    def visit_Call(self, node):
-        if isinstance(node.func, ast.Name):
-            func_name = node.func.id
-        else:
-            func_name = getAttributeChain(node.func)
-
-        if func_name not in self.allowedCalls:
-            raise ValueError(f"Unsupported function in expression: {func_name}")
-
-        for arg in node.args:
-            self.visit(arg)
-
-        for keyword in node.keywords:
-            if keyword.arg is None:
-                raise ValueError("Unsupported keyword expansion in expression.")
-            self.visit(keyword.value)
-
-
-def normalizeCalculateExpression(expression: str):
-    return expression.replace('aggData.data', 'self.data').replace('self.dataFrame', 'self.data')
-
-
-def evaluateCalculateExpression(expression: str, aggregate_data):
-    normalized_expression = normalizeCalculateExpression(expression)
-    parsed_expression = ast.parse(normalized_expression, mode='eval')
-    AggregateDataExpressionValidator().visit(parsed_expression)
-    compiled_expression = compile(parsed_expression, '<aggregate-data-expression>', 'eval')
-    return eval(compiled_expression, {'__builtins__': {}},
-                {'self': aggregate_data, 'np': np, 'runBoxcox': runBoxcox})
 
 
 def getStandardError(x):
@@ -256,7 +206,7 @@ def doFilterOutData(row_var_list: list, column_var_list: list, expression: str, 
                 sd = sumTable2DataFrame(row_var_list, column_var_list, median_table2, dataFrame)
                 sd *= 1.4826
                 # remove the temp_var (abs(x - median(x)))
-                dataFrame.drop(columns=[temp_var_name], inplace=True)
+                dataFrame.drop(columns=[temp_var_name])
 
             else:
                 mean = sumTable2DataFrame(row_var_list, column_var_list, mean_table, dataFrame)
@@ -292,12 +242,12 @@ def filterDataFunc(row_var_list, column_var_list, dataFrame, ruleList, omegaValu
     for index, rule in enumerate(ruleList):
         variable_name, conditional_expression = rule.split(':')
         variable_name = variable_name.strip()
-        # Distinguish range rules from checklist rules
+        # 区分range规则和checklist规则
         if isCompareCond(conditional_expression):
             if not pd.api.types.is_numeric_dtype(tmp_data_frame[variable_name]):
                 tmp_data_frame[variable_name] = pd.to_numeric(tmp_data_frame[variable_name], errors='coerce')
 
-            # Range rule
+            # range规则
             if 'and' in conditional_expression:
                 expression_1, expression_2 = conditional_expression.split('and')
 
@@ -485,9 +435,9 @@ def singleShiftZs(count):
 
 
 def flattenValue(value):
-    if isinstance(value, list) and len(value) > 0 and isinstance(value[0], list):  # Preserve nested lists from MATLAB cell arrays
+    if isinstance(value, list) and len(value) > 0 and isinstance(value[0], list):  # 如果是列表（二维数组）
         return value[0]
-    else:  # Flatten scalar-like values
+    else:  # 如果是整数值或其他类型的值
         if len(value) == 0:
             return None
         if len(value[0]) == 0:
@@ -496,7 +446,7 @@ def flattenValue(value):
             return value[0]
         if len(value[0]) > 1:
             return ','.join(map(str, value[0]))
-        return value[0][0]  # Return the scalar value
+        return value[0][0]  # 直接返回该值
 
 
 def flattenValueMat73(value):
@@ -519,15 +469,14 @@ def flattenValueMat73(value):
 
 
 def readDatFile(file_path, containsHeader=True, encodingFormat='utf-8', delimiter=r'\s'):
+    df = None
     try:
-        df = None
-
         with open(file_path, 'r', encoding=encodingFormat) as file:
             lines = file.readlines()
 
             if containsHeader:
-                variable_names = re.split(delimiter, lines[0].strip())  # First row contains variable names
-                data = [re.split(delimiter, line.strip()) for line in lines[1:]]  # Split variable values by delimiter
+                variable_names = re.split(delimiter, lines[0].strip())  # 第一行为变量名
+                data = [re.split(delimiter, line.strip()) for line in lines[1:]]  # 以分隔符分隔的变量值
             else:
                 data = [re.split(delimiter, line.strip()) for line in lines]
                 variable_names = [f"Column{i + 1}" for i in range(len(data[0]))]
@@ -540,9 +489,8 @@ def readDatFile(file_path, containsHeader=True, encodingFormat='utf-8', delimite
                 df.columns = variable_names + [f'untitled{iVar}' for iVar in range(df.shape[1] - len(variable_names))]
             # return df
     except Exception as e:
-        raise IOError(f"Error in reading file! File probably changed/moved.:{file_path}:{e}", 3)
-    finally:
-        return df
+        print(f"\033[31mError in reading file! File probably changed/moved.:{file_path}:{e}\033[0m")
+    return df
 
 
 class AggregateData(object):
@@ -552,17 +500,23 @@ class AggregateData(object):
         self.data = pd.DataFrame()
         self.resultList = []
         self.fitMethods = ['Gamma (k, θ)',
+                           'Shifted Gamma (k, θ, shift)',
                            'Weibull (k, θ)',
+                           'Shifted Weibull (k, θ, shift)',
                            'LogNormal (k, θ)',
+                           'Shifted LogNormal (k, θ, shift)',
                            'Wald (m, a)',
                            'Ex-Wald (m, a, τ)',
                            'Shifted Wald (m, a, shift)',
                            'Ex-Gaussian (μ, σ, τ)',
                            'Inv-Gaussian (μ, λ)',
                            'Shifted Inv-Gaussian (μ, λ, shift)']
+        self.cognitiveFitMethods = list(COGNITIVE_MODEL_NAMES)
 
         self.DISTRIBUTION_MAP = {
             'Gamma (k, θ)': (['shape (k)', 'scale (θ)'], gamma_estimate_x),
+            'Shifted Gamma (k, θ, shift)': (
+                ['shape (k)', 'scale (θ)', 'shift'], shifted_gamma_estimate_x),
             'Wald (m, a)': (['mean rate (m)', 'response threshold (a)'], wald_estimate_x),
             'Ex-Wald (m, a, τ)': (['mean rate (m)', 'response threshold (a)', 'τ'], ex_wald_estimate_x),
             'Shifted Wald (m, a, shift)': (['mean rate (m)', 'response threshold (a)', 'shift'], shift_wald_estimate_x),
@@ -571,7 +525,11 @@ class AggregateData(object):
             'Shifted Inv-Gaussian (μ, λ, shift)': (
             ['mu (μ)', 'lambda (λ)', 'shift'], shifted_inverse_gaussian_estimate_x),
             'Weibull (k, θ)': (['shape (k)', 'scale (θ)'], weibull_estimate_x),
-            'LogNormal (k, θ)': (['shape (k)', 'scale (θ)'], log_normal_estimate_x)}
+            'Shifted Weibull (k, θ, shift)': (
+                ['shape (k)', 'scale (θ)', 'shift'], shifted_weibull_estimate_x),
+            'LogNormal (k, θ)': (['shape (k)', 'scale (θ)'], log_normal_estimate_x),
+            'Shifted LogNormal (k, θ, shift)': (
+                ['shape (k)', 'scale (θ)', 'shift'], shifted_log_normal_estimate_x)}
 
     def savePsyData(self, file_path):
         self.data.to_csv(file_path, sep='|', quoting=csv.QUOTE_NONNUMERIC, index=False, header=True)
@@ -587,40 +545,44 @@ class AggregateData(object):
 
     def readDatFiles(self, fileList, containsHeader=True, encodingFormat='utf-8', delimiter=r'\s'):
         all_dfs = []
+        loaded_files = []
 
         for file in fileList:
             df = readDatFile(file, containsHeader, encodingFormat, delimiter)
 
             if df is not None:
-                fileName = os.path.basename(file)
-                if fileName not in df.columns:
-                    df = df.assign(fileName=fileName)
                 all_dfs.append(df)
+                loaded_files.append(file)
 
-        self.data = pd.concat(all_dfs, ignore_index=True)
+        if all_dfs:
+            all_dfs, _source_column = addSourceFileColumn(all_dfs, loaded_files)
+            self.data = pd.concat(all_dfs, ignore_index=True)
+        else:
+            self.data = pd.DataFrame()
 
     def readMatlabFiles(self, files, appendDataModel=False):
         # Pre-allocate a list to store DataFrames for better efficiency
         data_frames = []
+        loaded_files = []
 
         for file in files:
             mat_data = loadmat(file)
             variable = mat_data.get('allResults_APL')
 
-            # Read column names from the first row
+            # Get column names from the first row: need to be confirmed
             columnList = [str(row.flat[0]) for line in variable[0] for row in line]
 
             # Convert to DataFrame, skipping the first row which contains column names
             df = pd.DataFrame(variable[1:], columns=columnList)
             # Apply the flatten function to all DataFrame elements
-            df = df.applymap(flattenValue)
+            df = mapDataFrameElements(df, flattenValue)
 
-            # Add filename if not present
-            if 'filename' not in columnList:
-                df['filename'] = os.path.basename(file)
             # Append DataFrame to list
             data_frames.append(df)
+            loaded_files.append(file)
 
+        data_frames, _source_column = addSourceFileColumn(
+            data_frames, loaded_files, existing_source_columns=('filename',))
         if appendDataModel:
             data_frames.append(self.data)
 
@@ -630,27 +592,28 @@ class AggregateData(object):
     def readMatlabFiles73(self, files, appendDataModel=False):
         # Pre-allocate a list to store DataFrames for better efficiency
         data_frames = []
+        loaded_files = []
 
         for file in files:
             mat_dat = mat73.loadmat(file)
             variable = mat_dat.get('allResults_APL', None)
 
             df = pd.DataFrame(variable[1:], columns=variable[0])
-            df = df.applymap(flattenValueMat73)
-
-            # Add filename if not present
-            if 'filename' not in variable[1:]:
-                df['filename'] = os.path.basename(file)
+            df = mapDataFrameElements(df, flattenValueMat73)
 
             # Append DataFrame to list
             data_frames.append(df)
+            loaded_files.append(file)
             # Concatenate all DataFrames at once for efficiency
+        data_frames, _source_column = addSourceFileColumn(
+            data_frames, loaded_files, existing_source_columns=('filename',))
         if appendDataModel:
             data_frames.append(self.data)
         self.data = pd.concat(data_frames, ignore_index=True)
 
     def calculateVariable(self, target_variable_name, calculate_expression):
-        self.data[target_variable_name] = evaluateCalculateExpression(calculate_expression, self)
+        self.data[target_variable_name] = evaluate_aggregate_expression(
+            calculate_expression, self, np, runBoxcox)
 
     def filterData(self, row_vars, col_vars, ruleList, omegaValues=None):
         if omegaValues is None:
@@ -663,10 +626,10 @@ class AggregateData(object):
         if omegaValues is None:
             omegaValues = [-1 for _ in ruleList]
 
-        self.resultList = []
+        warnConditionWiseFiltering(row_vars, col_vars, self.data, ruleList)
 
         for target_var in target_vars:
-            target_var_name, operation = target_var.split('@')
+            target_var_name, operation, _specification = split_target(target_var)
             if not pd.api.types.is_numeric_dtype(self.data[target_var_name]):
                 self.data[target_var_name] = pd.to_numeric(self.data[target_var_name], errors='coerce')
 
@@ -675,7 +638,7 @@ class AggregateData(object):
         result_frame_var_names = []
 
         for target_var in target_vars:
-            target_var_name, operation = target_var.split('@')
+            target_var_name, operation, specification = split_target(target_var)
 
             result = None
 
@@ -736,7 +699,8 @@ class AggregateData(object):
                                             aggfunc=getStandardError)
             elif operation in self.fitMethods:
                 group_vars = row_vars + col_vars
-                parameter_names, estimate_func = self.DISTRIBUTION_MAP[operation]
+                parameter_names, _estimate_func = self.DISTRIBUTION_MAP[operation]
+                estimate_func = lambda values: fit_rt_distribution_values(values, operation, log_diagnostics=True)
 
                 if 'Wald' in operation:
                     print(f"Start to fit the data dist via {operation}...")
@@ -754,7 +718,48 @@ class AggregateData(object):
 
                 result = groupby_to_pivot_tables(grouped_result, row_vars, col_vars)
 
-                target_var = [f"{target_var_name}@{operation} {item}" for item in parameter_names]
+                output_names = parameter_names + FIT_DIAGNOSTIC_NAMES
+                target_var = [f"{target_var_name}@{operation} {item}" for item in output_names]
+            elif operation in self.cognitiveFitMethods:
+                if not specification:
+                    raise ValueError(
+                        f'{target_var_name}@{operation} has no saved model settings.')
+                print(cognitive_model_reference_text(operation))
+                group_vars = row_vars + col_vars
+
+                def fit_model_group(group_frame):
+                    fit = fit_cognitive_model(group_frame, specification)
+                    diagnostics = [
+                        fit['n_valid'], 'Yes' if fit['converged'] else 'No',
+                        str(fit['response_counts'])]
+                    if specification.get('accuracy_variable'):
+                        diagnostics.append(fit['accuracy_rate'])
+                    diagnostics.extend([fit['log_likelihood'], fit['aic'], fit['bic']])
+                    return np.asarray(list(fit['parameters']) + diagnostics, dtype=object)
+
+                if group_vars:
+                    grouped_values = {
+                        group_key: fit_model_group(group_frame)
+                        for group_key, group_frame in tmpDataFrame.groupby(
+                            group_vars, dropna=False, sort=False)
+                    }
+                    grouped_result = pd.Series(grouped_values)
+                    grouped_result.index.names = group_vars
+                else:
+                    grouped_result = pd.Series({'result': fit_model_group(tmpDataFrame)})
+                result = groupby_to_pivot_tables(grouped_result, row_vars, col_vars)
+                parameter_names = [
+                    f"{parameter['name']} ({parameter['mode'].capitalize()})"
+                    for parameter in specification['parameters']
+                ]
+                diagnostic_names = [
+                    'N valid', 'Converged', 'Response counts', 'Log-likelihood', 'AIC', 'BIC']
+                if specification.get('accuracy_variable'):
+                    diagnostic_names.insert(3, 'Accuracy rate')
+                target_var = [
+                    f'{target_var_name}@{operation} {name}'
+                    for name in parameter_names + diagnostic_names
+                ]
 
             if isinstance(target_var, list):
                 result_frame_var_names.extend(target_var)

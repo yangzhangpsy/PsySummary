@@ -1,13 +1,13 @@
-from PyQt5.QtCore import QRegExp, Qt, QAbstractListModel, QModelIndex, QVariant
+import pandas as pd
+
+from PyQt5.QtCore import QRegExp, Qt, QAbstractListModel, QModelIndex, QVariant, QSortFilterProxyModel, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette, QRegExpValidator
 from PyQt5.QtWidgets import QWidget, QCheckBox, QListWidgetItem, QMessageBox, QLabel, QComboBox, QStackedWidget, \
     QFrame, QTextEdit, QPushButton, QGridLayout, QGroupBox, QVBoxLayout, QHBoxLayout, \
-    QApplication, QListView, QStyledItemDelegate, QStyleOptionButton, QStyle, QSizePolicy
+    QApplication, QListView, QStyledItemDelegate, QStyleOptionButton, QStyle, QSizePolicy, QLineEdit
 
-import pandas as pd
-
+from app.func import Func
 from app.lib.draggablelistwidget import FilterDragListWidget
-from app.psyDataFunc import PsyDataFunc
 
 
 def get_compare_expression(operator: str, dataValue: str, dataType: str):
@@ -98,13 +98,34 @@ class MyModel(QAbstractListModel):
 
     def resetSelections(self):
         # Reset all checkbox states to unchecked
-        for row in range(len(self._data)):
-            self._data[row] = (self._data[row][0], False)
-        # Notify the view that all data has changed
-        self.layoutChanged.emit()
+        self.setAllChecked(False)
+
+    def setAllChecked(self, checked):
+        """Set every checklist item to the requested check state."""
+        if not self._data:
+            return
+        self._data = [(text, checked) for text, _current in self._data]
+        self.dataChanged.emit(self.index(0, 0), self.index(len(self._data) - 1, 0), [Qt.CheckStateRole])
+
+    def invertSelections(self):
+        """Invert the check state of every checklist item."""
+        if not self._data:
+            return
+        self._data = [(text, not checked) for text, checked in self._data]
+        self.dataChanged.emit(self.index(0, 0), self.index(len(self._data) - 1, 0), [Qt.CheckStateRole])
+
+    def areAllChecked(self):
+        """Return whether the model contains items and every item is checked."""
+        return bool(self._data) and all(checked for _text, checked in self._data)
+
+    def checkedCount(self):
+        """Return the number of checked checklist items."""
+        return sum(checked for _text, checked in self._data)
 
 
 class FilterWindow(QWidget):
+    previewRequested = pyqtSignal()
+
     def __init__(self, dataframe, mainFilterList):
         super().__init__()
         self.isVariableNumeric = None
@@ -119,7 +140,7 @@ class FilterWindow(QWidget):
         self.isValue2Disabled = False
         self.isValue1Disabled = False
 
-        self.setWindowIcon(PsyDataFunc.getImageObject("icon.png", type=1))
+        self.setWindowIcon(Func.getImageObject("common/icon.png", type=1))
         self.setWindowTitle("Define Filter")
         self.var_name_label = QLabel("Variable Names:")
         self.current_filters_label = QLabel("Current Filters:")
@@ -155,10 +176,26 @@ class FilterWindow(QWidget):
         """
         # Create the model
         self.model = MyModel([])  # Start with an empty model
+        self.checklist_proxy_model = QSortFilterProxyModel(self)
+        self.checklist_proxy_model.setSourceModel(self.model)
+        self.checklist_proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        self.checklist_proxy_model.setDynamicSortFilter(True)
         self.list_view = QListView()
-        self.list_view.setModel(self.model)
+        self.list_view.setModel(self.checklist_proxy_model)
         self.list_view.setItemDelegate(CheckboxDelegate())
         self.list_view.setVerticalScrollMode(QListView.ScrollPerPixel)
+
+        self.checklist_search = QLineEdit()
+        self.checklist_search.setPlaceholderText("Search values...")
+        self.checklist_toggle_all_btn = QCheckBox("Select All")
+        self.checklist_invert_btn = QPushButton("Invert Selection")
+        self.checklist_toggle_all_btn.setToolTip(
+            "Turn on to select every value; turn off after selecting all to clear every value."
+        )
+        self.checklist_invert_btn.setToolTip(
+            "Invert every value. To include all except specific values, check those values first and then invert."
+        )
+        self.checklist_selection_info = QLabel("Included: 0 / 0")
 
         """
         range page widgets
@@ -212,6 +249,9 @@ class FilterWindow(QWidget):
         """
         self.clear_btn = QPushButton("Clear")
         self.clear_all_btn = QPushButton("Clear All")
+        self.preview_btn = QPushButton("Distribution Preview")
+        self.preview_btn.setToolTip(
+            "Compare retained and excluded observations using the filters in this list.")
         self.close_btn = QPushButton("OK")
 
         self.range_page_info.setReadOnly(True)
@@ -268,7 +308,14 @@ in the view/analysis/summary procedure.""")
         checklist_layout = QVBoxLayout()
         checklist_layout.addWidget(self.checklist_page_var_info)
         checklist_layout.addWidget(self.checklist_page_info)
+        checklist_layout.addWidget(self.checklist_search)
         checklist_layout.addWidget(self.list_view)
+
+        checklist_button_layout = QHBoxLayout()
+        checklist_button_layout.addWidget(self.checklist_toggle_all_btn)
+        checklist_button_layout.addWidget(self.checklist_invert_btn)
+        checklist_layout.addLayout(checklist_button_layout)
+        checklist_layout.addWidget(self.checklist_selection_info)
 
         """
         cdf pooling page layout
@@ -328,6 +375,7 @@ in the view/analysis/summary procedure.""")
         btns_layout.addStretch()
         btns_layout.addWidget(self.clear_btn)
         btns_layout.addWidget(self.clear_all_btn)
+        btns_layout.addWidget(self.preview_btn)
         btns_layout.addWidget(self.close_btn)
 
         """
@@ -364,18 +412,24 @@ in the view/analysis/summary procedure.""")
 
         self.clear_btn.clicked.connect(self.clearOne)
         self.clear_all_btn.clicked.connect(self.clearAll)
+        self.preview_btn.clicked.connect(self.previewRequested.emit)
         self.close_btn.clicked.connect(self.closeWindow)
 
         self.add_btn.clicked.connect(self.addEvent)
+        self.checklist_search.textChanged.connect(self.checklist_proxy_model.setFilterFixedString)
+        self.checklist_toggle_all_btn.toggled.connect(self.setAllChecklistValues)
+        self.checklist_invert_btn.clicked.connect(self.invertChecklistValues)
+        self.model.dataChanged.connect(self.refreshChecklistControls)
+        self.model.modelReset.connect(self.refreshChecklistControls)
 
-        # Load existing filters
+        # 初始化 filter
         self.initFilterList()
 
         self.selected_var_name = self.data.columns[0]
         self.checklist_page_var_info.setText("Variable name: " + self.selected_var_name)
         self.range_page_var_info.setText("Variable name: " + self.selected_var_name)
         self.cdf_pooling_var_info.setText("Variable name: " + self.selected_var_name)
-        # Populate the selector
+        # 下拉框添加数据
         max_len, t_len = 0, 0
         pt_val = self.befiltered_var_box.font().pointSize()
 
@@ -388,8 +442,8 @@ in the view/analysis/summary procedure.""")
 
         self.befiltered_var_box.view().setMinimumWidth(max_len * pt_val)
 
-        # Initialize the checklist
-        # Default to the first variable
+        # initial the checklist with the first variable
+        # default to show the first variable in the list
         self.updateModelData(self.data.columns[0])
 
     def initFilterList(self):
@@ -487,24 +541,8 @@ in the view/analysis/summary procedure.""")
         # Get unique values from the selected column
         self.updateModelData(selected_var_name)
 
-    def isNumericVariable(self, variableName: str) -> bool:
-        variable_data = self.data[variableName]
-        if pd.api.types.is_numeric_dtype(variable_data):
-            return True
-
-        non_null_values = variable_data.dropna()
-        if non_null_values.empty:
-            return False
-
-        non_empty_values = non_null_values[non_null_values.astype(str).str.strip() != '']
-        if non_empty_values.empty:
-            return False
-
-        numeric_values = pd.to_numeric(non_empty_values, errors='coerce')
-        return numeric_values.notna().all()
-
     def updateModelData(self, variableName: str):
-        self.isVariableNumeric = self.isNumericVariable(variableName)
+        self.isVariableNumeric = not isinstance(self.data[variableName].iloc[0], str)
         unique_values = self.data[variableName].dropna().unique()
 
         # Prepare data for the model: [(value, False), ...]
@@ -513,22 +551,42 @@ in the view/analysis/summary procedure.""")
         self.model.beginResetModel()
         self.model._data = data
         self.model.endResetModel()
+        self.checklist_search.clear()
+        self.list_view.clearSelection()
 
-    # Legacy checklist path
+    def refreshChecklistControls(self):
+        """Refresh checklist action labels and the included-value count."""
+        total = self.model.rowCount()
+        checked = self.model.checkedCount()
+        if self.model.areAllChecked() or checked == 0:
+            self.checklist_toggle_all_btn.blockSignals(True)
+            self.checklist_toggle_all_btn.setChecked(self.model.areAllChecked())
+            self.checklist_toggle_all_btn.blockSignals(False)
+        self.checklist_selection_info.setText(f"Included: {checked} / {total}")
+
+    def setAllChecklistValues(self, checked):
+        """Select every value when enabled and clear all after it is disabled."""
+        self.model.setAllChecked(checked)
+
+    def invertChecklistValues(self):
+        """Invert all checklist selections without changing the active search."""
+        self.model.invertSelections()
+
+    # 添加多选框
     def insertOld(self):
         self.check_list.clear()
-        # Recompute the variable type for the current selection
-        self.isVariableNumeric = self.isNumericVariable(self.selected_var_name)
+        # only check the first value
+        self.isVariableNumeric = not isinstance(self.data[self.selected_var_name].iloc[0], str)
 
         # Filter out null values and get unique non-null values
         non_null_values = self.data[self.selected_var_name].dropna().unique().tolist()
         QApplication.processEvents()
 
-        # Skip rendering if every value is empty
+        # in case all values are empty
         if any(non_null_values):
             for value in non_null_values:
                 box = QCheckBox(str(value))  # Create a QCheckBox
-                listItem = QListWidgetItem()  # Create a QListWidgetItem because a QCheckBox cannot be added directly
+                listItem = QListWidgetItem()  # 实例化一个Item，QListWidget，不能直接加入QCheckBox
                 self.check_list.addItem(listItem)  # Add QListWidgetItem to QListWidget
                 self.check_list.setItemWidget(listItem, box)  # Set QCheckBox as the widget for QListWidgetItem
 
@@ -536,7 +594,7 @@ in the view/analysis/summary procedure.""")
         # if not hasattr(self, 'check_list') or self.check_list is None:
         #     return []
 
-        count = self.check_list.count()  # Get the total number of QListWidget items
+        count = self.check_list.count()  # 得到QListWidget的总个数
         if count == 0:
             return []
 
@@ -562,19 +620,19 @@ in the view/analysis/summary procedure.""")
         else:
             self.addCdfPoolingEvent()
 
-    # Add a Pooling CDF filter
+    # cdfPooling event
     def addCdfPoolingEvent(self):
         text = self.selected_var_name
         text += ":Pooling CDF"
         self.filter_list.addItem(text)
         self.mainFilterList.addItem(text)
 
-    # Add the selected checklist values
+    # checklist确认事件
     def addCheckListEvent(self):
         chooses = self.getChoose()
         text = self.selected_var_name
         text += ":"
-        # Serialize the selected values
+        # 拼接所有多选框选中的值
         if self.isVariableNumeric:
             all_values_Str = "".join(f" = {v}" for v in chooses)
         else:
@@ -600,7 +658,7 @@ in the view/analysis/summary procedure.""")
     #             if checkbox_widget is not None:
     #                 checkbox_widget.setChecked(False)
 
-    # Add a range filter
+    # range 的 add 按钮按下事件
     def addRangeEvent(self):
         text = self.selected_var_name
         logical_operator_text = self.logical_operator_comboBox.currentText()
@@ -656,7 +714,7 @@ in the view/analysis/summary procedure.""")
         self.data_type_comboBox1.setCurrentIndex(0)
         self.data_type_comboBox2.setCurrentIndex(0)
 
-    # Clear all filters
+    # 清空
     def clearAll(self):
         self.filter_list.clear()
         self.mainFilterList.clear()
@@ -664,7 +722,7 @@ in the view/analysis/summary procedure.""")
     def onItemClicked(self, item):
         self.chooseItem = item
 
-    # Remove the selected filter
+    # 清除选中项
     def clearOne(self):
         if self.chooseItem is None:
             msg = QMessageBox(QMessageBox.Warning, "Warning", "Please select a filter item to clear.")
@@ -675,7 +733,7 @@ in the view/analysis/summary procedure.""")
             self.mainFilterList.takeItem(row)
             self.chooseItem = None
 
-    # Close the dialog
+    # 关闭窗口
     def closeWindow(self):
         self.close()
 
