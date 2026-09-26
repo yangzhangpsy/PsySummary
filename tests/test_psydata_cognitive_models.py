@@ -10,6 +10,7 @@ from scipy.integrate import quad
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 os.environ.setdefault('MPLCONFIGDIR', '/tmp/psysummary-test-matplotlib')
 
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication, QComboBox, QLineEdit
 
 from app.lib.cognitiveModelDialog import CognitiveModelDialog
@@ -332,6 +333,51 @@ class CognitiveModelNumericalTests(unittest.TestCase):
         model_actions = {action.text(): action for action in model_menu.actions()}
         self.assertTrue(model_actions['Change Analysis...'].isEnabled())
         self.assertTrue(model_actions['Model Settings...'].isEnabled())
+        widget.close()
+
+    def test_plain_data_item_single_click_opens_selector_without_delay(self):
+        widget = DraggableListWidget(DraggableListWidget.DataType)
+        widget.addItem('rt@Mean')
+        widget._last_mouse_button = Qt.LeftButton
+        with patch.object(widget, '_show_operation_selector') as show_selector:
+            widget.itemSingleClick(widget.item(0))
+
+        show_selector.assert_called_once_with(widget.item(0))
+        self.assertFalse(widget._single_click_timer.isActive())
+        widget.close()
+
+    def test_cognitive_data_item_single_click_waits_for_double_click(self):
+        widget = DraggableListWidget(DraggableListWidget.DataType)
+        widget.addItem(f'rt@{RATCLIFF_MODEL}')
+        widget._last_mouse_button = Qt.LeftButton
+        with patch.object(widget, '_show_operation_selector') as show_selector:
+            widget.itemSingleClick(widget.item(0))
+
+        show_selector.assert_not_called()
+        self.assertTrue(widget._single_click_timer.isActive())
+        self.assertIs(widget._pending_single_click_item, widget.item(0))
+        widget.close()
+
+    def test_plain_data_item_double_click_opens_operation_selector(self):
+        widget = DraggableListWidget(DraggableListWidget.DataType)
+        widget.addItem('rt@Mean')
+        with patch.object(widget, '_show_operation_selector') as show_selector, \
+                patch.object(widget, '_configure_model_item') as configure_model:
+            widget.itemDoubleClick(widget.item(0))
+
+        show_selector.assert_called_once_with(widget.item(0))
+        configure_model.assert_not_called()
+        widget.close()
+
+    def test_cognitive_data_item_double_click_opens_model_settings(self):
+        widget = DraggableListWidget(DraggableListWidget.DataType)
+        widget.addItem(f'rt@{LBA_MODEL}')
+        with patch.object(widget, '_show_operation_selector') as show_selector, \
+                patch.object(widget, '_configure_model_item') as configure_model:
+            widget.itemDoubleClick(widget.item(0))
+
+        show_selector.assert_not_called()
+        configure_model.assert_called_once_with(widget.item(0), LBA_MODEL)
         widget.close()
 
     def test_model_dialog_receives_current_filtered_rows(self):

@@ -160,11 +160,20 @@ class DraggableListWidget(ListWidget):
                     break
 
     def itemSingleClick(self, item):
-        """Delay the analysis selector so a second click can open model settings instead."""
+        """Open ordinary analyses immediately and defer only cognitive-model clicks."""
         if self._last_mouse_button != Qt.LeftButton:
             return
-        self._pending_single_click_item = item
-        self._single_click_timer.start(QApplication.doubleClickInterval())
+        try:
+            operation = item.text().split('@', 1)[1]
+        except (AttributeError, IndexError):
+            return
+        self._single_click_timer.stop()
+        self._pending_single_click_item = None
+        if is_cognitive_model(operation):
+            self._pending_single_click_item = item
+            self._single_click_timer.start(QApplication.doubleClickInterval())
+        else:
+            self._show_operation_selector(item)
 
     def mousePressEvent(self, event):
         """Remember which mouse button produced the subsequent item-click signal."""
@@ -179,19 +188,25 @@ class DraggableListWidget(ListWidget):
             self._show_operation_selector(item)
 
     def itemDoubleClick(self, item):
-        """Open settings when a cognitive-model Data item is double-clicked."""
+        """Open model settings for cognitive analyses or the selector otherwise."""
         self._single_click_timer.stop()
         self._pending_single_click_item = None
-        self._clear_operation_selector()
         try:
-            currentText = item.text().split("@", 1)[1]
-            if is_cognitive_model(currentText):
-                self._configure_model_item(item, currentText)
-        except (IndexError, ValueError):
+            operation = item.text().split('@', 1)[1]
+        except (AttributeError, IndexError):
             return
+        if is_cognitive_model(operation):
+            self._clear_operation_selector()
+            self._configure_model_item(item, operation)
+        else:
+            self._show_operation_selector(item)
 
     def _show_operation_selector(self, item):
         """Replace one Data item temporarily with its analysis-operation combo box."""
+        if self.itemLabel is item and self.combo_box is not None:
+            if not self.combo_box.view().isVisible():
+                QTimer.singleShot(0, self.combo_box.showPopup)
+            return
         try:
             current_text = item.text().split('@', 1)[1]
             operations = list(DATA_OPERATIONS)
