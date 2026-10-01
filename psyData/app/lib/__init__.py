@@ -10,3 +10,4 @@ from .dataFrameTableWidget import DataFrameTableWidget
 from .pivotedDataWidget import PivotedDataWidget
 from .scriptDock import ScriptDock
 from .decoding_files import DecodingFiles
+from .settings import Settings
