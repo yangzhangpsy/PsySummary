@@ -1,14 +1,15 @@
 import ast
 import sys
-import pandas as pd
 import numpy as np
+import pandas as pd
 from scipy.stats import boxcox
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (QLabel, QLineEdit, QPushButton, QApplication, QListWidget,
                              QGridLayout, QHBoxLayout, QWidget, QListWidgetItem, QSizePolicy,
                              QMessageBox)
-
+from app.psyDataFunc import PsyDataFunc as Func
 from app.lib import MessageBox
+
 from app.lib.list_widget import ListWidget
 from app.psyDataFunc import PsyDataFunc
 
@@ -54,7 +55,6 @@ def getAttributeChain(node):
         parts.append(node.id)
         return ".".join(reversed(parts))
     return None
-
 
 class VariableExpressionValidator(ast.NodeVisitor):
     allowedCalls = {'runBoxcox', 'np.log', 'np.exp', 'np.logical_and', 'np.logical_or'}
@@ -138,13 +138,11 @@ class VariableExpressionValidator(ast.NodeVisitor):
                 raise ValueError("Unsupported keyword expansion in expression.")
             self.visit(keyword.value)
 
-
 def evaluateVariableExpression(expression: str, widget):
     parsed_expression = ast.parse(expression, mode='eval')
     VariableExpressionValidator().visit(parsed_expression)
     compiled_expression = compile(parsed_expression, '<variable-expression>', 'eval')
     return eval(compiled_expression, {'__builtins__': {}}, {'self': widget, 'np': np, 'runBoxcox': runBoxcox})
-
 
 def convertExpressionToAggregateData(expression: str):
     return expression.replace('self.dataFrame', 'self.data')
@@ -163,7 +161,7 @@ class VariableCompute(QWidget):
         self.dataFrame = dataFrame
 
         self.setWindowTitle('Compute Variable')
-        self.setWindowIcon(PsyDataFunc.getImageObject("icon.png", type=1))
+        self.setWindowIcon(Func.getImageObject("icon.png", type=1))
         # self.setGeometry(100, 100, 800, 600)
         self.initUI()
 
@@ -211,7 +209,8 @@ class VariableCompute(QWidget):
 
         for position, button_text in zip(positions, buttons):
             button = QPushButton(button_text)
-            button.setFixedSize(50, 50)
+            button_width = 70 if position[1] == 4 else 50
+            button.setFixedSize(button_width, 50)
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
             if button_text == 'Del':
@@ -250,10 +249,10 @@ class VariableCompute(QWidget):
         main_layout.addLayout(operators_layout, 1, 1, 3, 2)
         main_layout.addLayout(button_layout, 7, 0, 1, 4)
 
-        # Set the main layout
+        # Setting layout to main widget
         self.setLayout(main_layout)
 
-        # Allow dragging items out of the list
+        # Enable drag and drop
         self.variable_list.setDragEnabled(True)
         self.variable_list.setDragDropMode(QListWidget.DragOnly)
 
@@ -281,29 +280,28 @@ class VariableCompute(QWidget):
         if text in translateDict:
             text = translateDict[text]
 
-            # Cache the cursor state
+            # 获取当前状态
         cursor_pos = self.numeric_expression.cursorPosition()
         original_length = len(self.numeric_expression.text())
         is_at_end = cursor_pos == original_length
 
-        # Insert the template
+        # 插入表达式
         self.numeric_expression.insert(text)
 
-        # Put the cursor inside function templates
+        # 仅当光标在末尾且是转换后的表达式时处理
         if is_at_end and original_text in translateDict:
-            # Find the first opening parenthesis
+            # 直接查找第一个左括号位置
             lparen_pos = text.find('(')
             if lparen_pos != -1:
-                # Move inside the first parentheses
+                # 定位到第一个括号后
                 new_pos = cursor_pos + lparen_pos + 1
                 self.numeric_expression.setCursorPosition(new_pos)
             else:
-                # Otherwise move to the end
+                # 无括号则定位到末尾
                 self.numeric_expression.setCursorPosition(cursor_pos + len(text))
         else:
-            # Keep the default mid-string behavior
+            # 非末尾保持原有逻辑
             self.numeric_expression.setCursorPosition(cursor_pos + len(text))
-
     def on_operator_button_click_old(self, text):
         translateDict = {'log': 'np.log()',
                          'exp': 'np.exp()',

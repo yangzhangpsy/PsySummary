@@ -1,12 +1,14 @@
 import datetime
 import os
-import platform
 import re
+import time
 
-from PyQt5.QtCore import QDir, Qt, pyqtSignal
-from PyQt5.QtWidgets import QTextEdit, QAction
+from PyQt5.QtCore import QDir, Qt, QTimer, pyqtSignal
+from PyQt5.QtWidgets import (
+    QAction, QApplication, QFileDialog, QMessageBox, QTextEdit,
+)
 
-from app.lib.dock_widget import DockWidget
+from app.lib import DockWidget
 
 
 class Output(DockWidget):
@@ -15,15 +17,17 @@ class Output(DockWidget):
     """
     realVisibleChanged = pyqtSignal(bool)
 
-    def __init__(self, tabifyDock: bool = False):
+    def __init__(self, tabifyDock: bool = False, export_default_filename=None):
         super(Output, self).__init__()
         self.tabify_dock = tabifyDock
         # title
         self.setWindowTitle("Output")
         # main widget is a widget_name edit
-        self.text_edit = OutputTextEdit()
+        self.text_edit = OutputTextEdit(export_default_filename)
         self.text_edit.setReadOnly(True)
         self.scroll_bar = self.text_edit.verticalScrollBar()
+        self.error_beep_pending = False
+        self.last_error_beep_time = 0.0
         # first str is work path of this software
         self.text_edit.setHtml(f"<b>{QDir().currentPath()}</b>")
         self.text_edit.append('<p style="font:5px;color:white">.</p>')
@@ -65,22 +69,22 @@ class Output(DockWidget):
             self.text_edit.append(f'<b style="color:rgb(199,84,80)">[warning]</b> {information}')
         elif information_type == 3:
             self.text_edit.append(f'<b style="color:rgb(255,84,80)">[error]</b> {information}')
-            try:
-                if platform.system() == "Windows":
-                    # only windows support
-                    import winsound
-                    winsound.MessageBeep(winsound.MB_ICONHAND)
-                elif platform.system() == "Darwin":
-                    # for mac ox
-                    os.system('afplay /System/Library/Sounds/Funk.aiff')
-                else:
-                    # for linux at least for Unbuntu
-                    os.system("paplay /usr/share/sounds/freedesktop/stereo/bell.oga")
-            except:
-                pass
+            self.requestErrorBeep()
         self.text_edit.append('<p style="font:5px;color:white">.</p>')
         # to the bottom
         self.scroll_bar.setSliderPosition(self.scroll_bar.maximum())
+
+    def requestErrorBeep(self) -> None:
+        """Play one asynchronous alert for a burst of related error messages."""
+        if self.error_beep_pending or time.monotonic() - self.last_error_beep_time < 1.0:
+            return
+        self.error_beep_pending = True
+        QTimer.singleShot(0, self.playErrorBeep)
+
+    def playErrorBeep(self) -> None:
+        self.error_beep_pending = False
+        self.last_error_beep_time = time.monotonic()
+        QApplication.beep()
 
     def clear(self):
         """
@@ -93,10 +97,10 @@ class Output(DockWidget):
 
 
 class OutputTextEdit(QTextEdit):
-
-    def __init__(self):
+    def __init__(self, export_default_filename=None):
         super(OutputTextEdit, self).__init__()
         self.setObjectName("OutputQTextEdit")
+        self.export_default_filename = export_default_filename
 
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self.openMenu)
@@ -109,7 +113,40 @@ class OutputTextEdit(QTextEdit):
         clearAction.triggered.connect(self.clearMe)
 
         menu.addAction(clearAction)
+        if self.export_default_filename:
+            export_action = QAction("Export Log...", self)
+            export_action.triggered.connect(self.exportLog)
+            menu.addAction(export_action)
         menu.exec_(self.mapToGlobal(e))
+
+    def exportLog(self):
+        """Export the visible output as a UTF-8 plain-text log."""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            'Export Output Log',
+            self.export_default_filename,
+            'Text Files (*.txt)',
+        )
+        if not file_path:
+            return
+        root, extension = os.path.splitext(file_path)
+        if extension.lower() != '.txt':
+            file_path = root + '.txt' if extension else file_path + '.txt'
+        try:
+            lines = []
+            block = self.document().begin()
+            while block.isValid():
+                line = block.text()
+                if line.strip() != '.':
+                    lines.append(line)
+                block = block.next()
+            content = '\n'.join(lines).rstrip()
+            if content:
+                content += '\n'
+            with open(file_path, 'w', encoding='utf-8') as output_file:
+                output_file.write(content)
+        except OSError as error:
+            QMessageBox.warning(self, 'Export Log Error', str(error))
 
     def clearMe(self):
         self.clear()

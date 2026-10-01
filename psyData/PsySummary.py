@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import csv
-import platform
+import ast
 import sys
 import traceback
 import re
@@ -10,29 +10,55 @@ import numpy as np
 import pandas as pd
 from scipy.io import matlab
 
-from PyQt5.QtCore import Qt, QEvent
+from PyQt5.QtCore import QEvent, QSettings, QTimer, Qt
 from PyQt5.QtWidgets import QApplication, QFileDialog, \
-    QHBoxLayout, QGridLayout, QLabel, QVBoxLayout, QPushButton, QMenu, QWidget, QMainWindow, QMessageBox, QAction
-from PyQt5.QtGui import QKeySequence
-
-from app.lib import DecodingFiles, DraggableListWidget, VariableDraggableListWidget, MainFilterListWidget
-from app.lib import ImportMatThread
-from app.lib import MessageBox
-from app.lib import FilterWindow
-from app.lib import DataFrameTableWidget
-from app.lib import PivotedDataWidget
-from app.lib import ScriptDock
-
+    QHBoxLayout, QGridLayout, QLabel, QVBoxLayout, QPushButton, QMenu, QWidget, QMainWindow, QMessageBox, QAction, \
+    QActionGroup, QDockWidget, QStyle, QToolButton
+from PyQt5.QtGui import QKeySequence, QPainter, QPalette
+from app.psyDataFunc import PsyDataFunc as Func
+from app.info import Info
+from app.lib import MessageBox, Settings
+from app.lib.decoding_files import DecodingFiles
+from app.lib.import_mat_thread import ImportMatThread
+from app.lib.source_file import addSourceFileColumn
+from app.lib.draggablelistwidget import DraggableListWidget, MainFilterListWidget, \
+    VariableDraggableListWidget, MODEL_SPEC_ROLE
+from app.lib.filterWindow import FilterWindow
+from app.lib.dataFrameTableWidget import DataFrameTableWidget
+from app.lib.distributionPreview import DistributionPreviewDialog
+from app.lib.modelFitOverlay import ModelFitOverlay
+from app.lib.pivotedDataWidget import MODEL_FIT_METHODS, PivotedDataWidget
 from app.psyDataFunc import PsyDataFunc
 from app.psyDataInfo import PsyDataInfo
-
+from app.lib.scriptDock import ScriptDock
 from app.tool import StatisticTool, FlashMessageBox
 from app.variableCompute import VariableCompute
+from app.output import Output
+from app.cognitiveModelSpec import (
+    COGNITIVE_MODEL_NAMES, split_target, validate_model_data,
+)
+
+
+PSYSUMMARY_SETUP_DIRECTORY_KEY = 'psysummary_setup_directory'
+
+
+class ResultsToggleButton(QToolButton):
+    """Draw a clickable Results chevron without a native button frame."""
+
+    def paintEvent(self, _event):
+        """Paint only the current chevron text using the appropriate palette color."""
+        painter = QPainter(self)
+        color_group = QPalette.Active if self.isEnabled() else QPalette.Disabled
+        painter.setPen(self.palette().color(color_group, QPalette.ButtonText))
+        font = painter.font()
+        font.setPointSize(16)
+        painter.setFont(font)
+        painter.drawText(self.rect(), Qt.AlignCenter, self.text())
 
 
 def setListWidgetData(widget, items):
     if hasattr(widget, 'contentList'):
-        widget.contentList = items
+        widget.contentList = list(items)
         # False to keep the content list untouched
         widget.clear(False)
     else:
@@ -46,23 +72,33 @@ def getListWidgetData(widget):
     return [widget.item(i).text() for i in range(widget.count())]
 
 
+def getDataListEntries(widget):
+    """Return Data targets while preserving structured cognitive-model settings."""
+    entries = []
+    for index in range(widget.count()):
+        item = widget.item(index)
+        specification = item.data(MODEL_SPEC_ROLE)
+        entries.append({'model_specification': specification} if specification else item.text())
+    return entries
+
+
 def parseStringToList(string):
     start_index = string.find(": ")
 
     if start_index != -1:
-        list_string = string[start_index + 2:]
-
-        filter_list = eval(list_string)
-
+        list_string = string[start_index + 2:]  # 提取包含列表的部分
+        # 使用 eval() 函数解析字符串并转换为列表
+        filter_list = ast.literal_eval(list_string)
+        # 输出转换后的列表
         return filter_list
     else:
         return None
 
 
 def fixColumnName(name, shouldStartWithLetter: bool = False):
-
+    # 去掉不符合规则的字符，仅保留合法字符
     fixed_name = ''.join(re.findall(r'[a-zA-Z0-9_\-.]', name))
-
+    # 确保列名以字母开头
     if shouldStartWithLetter:
         if not fixed_name or not re.match(r'^[a-zA-Z]', fixed_name):
             fixed_name = 'col' + fixed_name  # 添加前缀以满足规则
@@ -112,32 +148,41 @@ class PsyData(QMainWindow):
         super().__init__()
 
         # self.plugin_mode = not __name__ == "__main__"
-        self.files = None
         self.plugin_mode = False
         self.readMatThreads = dict()
         self.pivotTableWindow = None
+        self._pending_result_widget = None
+        self._model_fit_message_box = None
+        self._results_dock_width = 400
+        self._results_collapsed_width = None
+        self._results_geometry_expanded = False
+        self._results_transition = False
+        self._results_window_resizing = False
+        self._closing = False
         self.filterWindow = None
+        self.distributionPreviewWindow = None
         self.tableFrame = None
         self.variablesNameList = None
         self.import_file = None
         self.data = pd.DataFrame()
         self.dataReadStart = False
-
-        self.is_windows = platform.system() == "Windows"
-
+        self.model_fit_running = False
+        self._closing_after_model_cancel = False
+        self._menu_enabled_before_model_fit = True
+        self.is_windows = Info.OS_TYPE == 0
+        self.files = None
         self.lst = [None, ' ']
         self.analysisScript = []
-        self.FILE_DIRECTORY = ''
 
         PsyDataInfo.PsyData = self
 
         if self.plugin_mode:
-            self.resize(800, 700)
+            self.resize(980, 700)
         else:
-            self.resize(800, 700)
+            self.resize(980, 700)
 
         self.setWindowTitle('Data Summary')
-        self.setWindowIcon(PsyDataFunc.getImageObject("icon.png", type=1))
+        self.setWindowIcon(Func.getImageObject("icon.png", type=1))
         # set the central widget
         self.central_widget = QWidget()
         self.computationVariableGui = VariableCompute(self.data)
@@ -152,6 +197,9 @@ class PsyData(QMainWindow):
         tool_menu: QMenu = menubar.addMenu("&Toolbox")
 
         file_menu.addAction("Load Data", self.loadDataFile, QKeySequence(QKeySequence.Open))
+        self.open_recent_menu = file_menu.addMenu("Open Recent")
+        self.open_recent_menu.aboutToShow.connect(self.refreshOpenRecentMenu)
+        self.refreshOpenRecentMenu()
         file_menu.addAction("View Data", self.showDataTable, QKeySequence(QKeySequence.WhatsThis))
         file_menu.addAction("Save Data", self.savePsyData, QKeySequence(QKeySequence.Save))
         file_menu.addAction("Save Filtered Data", self.saveFilteredData, QKeySequence(QKeySequence.SaveAs))
@@ -166,11 +214,27 @@ class PsyData(QMainWindow):
 
         view_menu: QMenu = menubar.addMenu("&View")
 
+        self.results_dock = QDockWidget('Aggregation Results', self)
+        self.results_dock.setObjectName('aggregationResultsDock')
+        self.results_dock.setAllowedAreas(Qt.RightDockWidgetArea)
+        self.results_dock.setFeatures(QDockWidget.DockWidgetClosable)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.results_dock)
+        self.setCorner(Qt.TopRightCorner, Qt.RightDockWidgetArea)
+        self.setCorner(Qt.BottomRightCorner, Qt.RightDockWidgetArea)
+        self.results_dock.hide()
+        self.results_dock.visibilityChanged.connect(
+            self._aggregationResultsVisibilityChanged)
+        self.results_action = QAction('&Aggregation Results', self)
+        self.results_action.setCheckable(True)
+        self.results_action.setEnabled(False)
+        self.results_action.triggered.connect(self._setAggregationResultsVisible)
+        view_menu.addAction(self.results_action)
+
         self.script_action = QAction("&Script", self)
         self.script_action.setData("script")
 
         if self.is_windows:
-            checked_icon = PsyDataFunc.getImageObject("checked", 1)
+            checked_icon = Func.getImageObject("checked", 1)
             self.script_action.setIcon(checked_icon)
             self.script_action.setIconVisibleInMenu(True)
         else:
@@ -182,12 +246,9 @@ class PsyData(QMainWindow):
         """
         # output dock and action
         """
-        """
-        # output dock and action
-        """
         if not self.plugin_mode:
-            from app.output import Output
-            self.output = Output(True)
+            self.output = Output(
+                True, export_default_filename='psySummaryLog.txt')
             self.addDockWidget(Qt.BottomDockWidgetArea, self.output)
             self.output.realVisibleChanged.connect(self.setActionIcon)
 
@@ -195,9 +256,10 @@ class PsyData(QMainWindow):
             self.output_action.setData("output")
 
             if self.is_windows:
-                checked_icon = PsyDataFunc.getImageObject("checked", 1)
+                checked_icon = Func.getImageObject("checked", 1)
                 self.output_action.setIcon(checked_icon)
-
+                # self.output_action.setCheckable(True)
+                # self.output_action.setChecked(True)
                 self.output_action.setIconVisibleInMenu(True)
             else:
                 self.output_action.setCheckable(True)
@@ -212,6 +274,7 @@ class PsyData(QMainWindow):
             self.output.setFocus()
 
             view_menu.addAction(self.output_action)
+
         view_menu.addAction(self.script_action)
 
         #  lists
@@ -227,16 +290,43 @@ class PsyData(QMainWindow):
 
         # buttons
         self.filter_button = QPushButton('Define Filters')
-        self.save_filter_button = QPushButton('Save Filter')
-        self.load_filter_button = QPushButton('Load Filter')
-        self.run_button = QPushButton('Run')
+        self.filter_button.setToolTip(
+            'Create or edit the filtering rules used for preview, export, and analysis.')
+        self.distribution_preview_button = QPushButton('Preview Filter Effects')
+        self.distribution_preview_button.setToolTip(
+            'Compare distributions before and after applying the current filters.')
+        self.export_filtered_button = QPushButton('Export Filtered Data')
+        self.export_filtered_button.setToolTip(
+            'Save retained rows without changing the currently loaded data.')
+        self.save_filter_button = QPushButton('Save Setup')
+        self.save_filter_button.setToolTip(
+            'Save the current Rows, Columns, Data, and Filters configuration.')
+        self.load_filter_button = QPushButton('Load Setup')
+        self.load_filter_button.setToolTip(
+            'Load a previously saved PsySummary configuration.')
+        # A doubled ampersand renders one literal ampersand instead of a Qt mnemonic.
+        self.run_button = QPushButton('Apply Filters && Run')
+        self.run_button.setToolTip(
+            'Apply the current filters to the original data and run the selected analysis.')
         self.close_button = QPushButton('Close')
+        self.results_toggle_button = ResultsToggleButton()
+        self.results_toggle_button.setText('》')
+        self.results_toggle_button.setFixedSize(22, 24)
+        self.results_toggle_button.setCursor(Qt.PointingHandCursor)
+        self.results_toggle_button.setFocusPolicy(Qt.NoFocus)
+        self.results_toggle_button.setEnabled(False)
+        self.results_toggle_button.hide()
+        self.results_toggle_button.setToolTip(
+            'Run an analysis to create Aggregation Results.')
 
         self.filter_button.clicked.connect(self.defineFilterEvent)
+        self.distribution_preview_button.clicked.connect(self.showDistributionPreview)
+        self.export_filtered_button.clicked.connect(self.saveFilteredData)
         self.save_filter_button.clicked.connect(self.saveFilterEvent)
         self.load_filter_button.clicked.connect(self.loadFilterEvent)
         self.run_button.clicked.connect(self.runSummary)
         self.close_button.clicked.connect(self.clickCloseEvent)
+        self.results_toggle_button.clicked.connect(self._toggleAggregationResults)
 
         self.computationVariableGui.transformFinished.connect(self.transformVariable)
 
@@ -251,6 +341,9 @@ Del key on the keyboard, right-click on
 and select 'Delete' from the menu, or
 drag the variable back to the variable list.
 """)
+        instruction_font = self.instruct_lab.font()
+        instruction_font.setPointSizeF(instruction_font.pointSizeF() + 2.0)
+        self.instruct_lab.setFont(instruction_font)
 
         # Layout for bottom buttons
         buttons_layout = QHBoxLayout()
@@ -258,7 +351,11 @@ drag the variable back to the variable list.
         buttons_layout.addWidget(self.filter_button, 1)
         buttons_layout.addWidget(self.save_filter_button, 1)
         buttons_layout.addWidget(self.load_filter_button, 1)
+        buttons_layout.addSpacing(10)
+        buttons_layout.addWidget(self.distribution_preview_button, 1)
+        buttons_layout.addWidget(self.export_filtered_button, 1)
         buttons_layout.addWidget(self.run_button, 1)
+        buttons_layout.addSpacing(10)
         buttons_layout.addWidget(self.close_button, 1)
         buttons_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -272,7 +369,14 @@ drag the variable back to the variable list.
         main_layout.addWidget(self.instruct_lab, 0, 0, 2, 1)
 
         main_layout.addWidget(QLabel("Columns:"), 0, 2, 1, 1)
-        main_layout.addWidget(QLabel("Variables:"), 0, 4, 1, 1)
+        self.variables_header = QWidget()
+        variables_header_layout = QHBoxLayout(self.variables_header)
+        variables_header_layout.setContentsMargins(0, 0, 0, 0)
+        variables_header_layout.setSpacing(4)
+        variables_header_layout.addWidget(QLabel("Variables:"))
+        variables_header_layout.addStretch(1)
+        variables_header_layout.addWidget(self.results_toggle_button)
+        main_layout.addWidget(self.variables_header, 0, 4, 1, 1)
         main_layout.addWidget(self.columns_list, 1, 2, 1, 1)
         main_layout.addWidget(self.variables_list, 1, 4, 3, 1)
         main_layout.addWidget(QLabel("Rows:"), 2, 0, 1, 1)
@@ -294,10 +398,8 @@ drag the variable back to the variable list.
         # self.setLayout(all_layout)
         self.central_widget.setLayout(all_layout)
         self.setCentralWidget(self.central_widget)
-
-        # self.statusBar = QStatusBar()
-        # self.setStatusBar(self.statusBar)
-        self.installEventFilter(self)
+        self.model_fit_overlay = ModelFitOverlay(self)
+        self.model_fit_overlay.syncGeometry()
 
     def setDockView(self, checked):
         if self.sender() is self.output_action:
@@ -334,38 +436,101 @@ drag the variable back to the variable list.
         options = QFileDialog.Options()
         # options |= QFileDialog.DontUseNativeDialog
 
-        if self.FILE_DIRECTORY:
-            default_dir = self.FILE_DIRECTORY
+        if Info.FILE_DIRECTORY:
+            default_dir = Info.FILE_DIRECTORY
         else:
-            default_dir = os.path.expanduser('~')
+            default_dir = Info.UserPath
 
         files, _ = QFileDialog.getOpenFileNames(self, "Select File(s)", default_dir,
                                                 "Matlab Files (*.mat);;Text Files (*.txt);;Text Files (*.csv);;Dat Files (*.dat);;psyData Files (*.psydata)",
                                                 options=options)
 
         if files:
-            try:
-                self.files = files
-                _, file_extension = os.path.splitext(files[0])
+            self.openDataFiles(files)
 
-                if file_extension == '.txt' or file_extension == '.dat' or file_extension == '.csv':
-                    self.import_file = DecodingFiles(files)
-                    self.import_file.ok_btn.clicked.connect(self.decodingFileOKPressedEvent)
-                    self.import_file.show()
-                elif file_extension == '.mat':
-                    # clear it first
-                    # self.data = pd.DataFrame()
-                    self.readMatlabFilesMThread(files)
-                    # self.clearAllListAndSetData()
-                elif file_extension == '.psydata':
-                    self.data = readPsyDataFiles(files)
-                    self.clearAllListAndSetData()
+    @staticmethod
+    def normalizeRecentFilePaths(file_paths):
+        """Normalize QSettings and dialog file-path values to a string list."""
+        if isinstance(file_paths, (str, bytes)):
+            file_paths = [file_paths]
+        elif not isinstance(file_paths, list):
+            file_paths = list(file_paths) if file_paths else []
+        return [
+            os.path.abspath(os.path.expanduser(os.fsdecode(file_path)))
+            for file_path in file_paths
+            if isinstance(file_path, (str, bytes)) and file_path
+        ]
 
-                self.FILE_DIRECTORY = os.path.dirname(files[0])
+    def openDataFiles(self, files):
+        """Open one or more supported data files through the normal import workflow."""
+        files = self.normalizeRecentFilePaths(files)
+        if not files:
+            return
+        try:
+            self.files = files
+            _, file_extension = os.path.splitext(files[0])
+            file_extension = file_extension.lower()
 
-            except Exception as e:
-                msg_box = FlashMessageBox('Flash Message', str(e))
-                msg_box.show()
+            if file_extension in {'.txt', '.dat', '.csv'}:
+                self.import_file = DecodingFiles(files, add_source_file=True)
+                self.import_file.ok_btn.clicked.connect(self.decodingFileOKPressedEvent)
+                self.import_file.finalDataReady.connect(self.decodingFileDataReady)
+                self.import_file.show()
+            elif file_extension == '.mat':
+                self.readMatlabFilesMThread(files)
+            elif file_extension == '.psydata':
+                self.data = readPsyDataFiles(files)
+                self.clearAllListAndSetData()
+                self.updateRecentFiles(files)
+            else:
+                raise ValueError(f"Unsupported data file type: {file_extension or 'no extension'}")
+        except Exception as e:
+            msg_box = FlashMessageBox('Flash Message', str(e))
+            msg_box.show()
+
+    def updateRecentFiles(self, file_paths):
+        """Add successfully opened data files to PsySummary's recent-file history."""
+        new_paths = self.normalizeRecentFilePaths(file_paths)
+        settings = Settings(Info.ConfigFile, QSettings.IniFormat)
+        recent_paths = self.normalizeRecentFilePaths(
+            settings.value('psysummary_recent_files', []))
+        for file_path in reversed(new_paths):
+            if file_path in recent_paths:
+                recent_paths.remove(file_path)
+            recent_paths.insert(0, file_path)
+        settings.setValue('psysummary_recent_files', recent_paths[:20])
+        if hasattr(self, 'open_recent_menu'):
+            self.refreshOpenRecentMenu()
+
+    def refreshOpenRecentMenu(self):
+        """Rebuild PsySummary's Open Recent submenu from its data-file history."""
+        self.open_recent_menu.clear()
+        settings = Settings(Info.ConfigFile, QSettings.IniFormat)
+        recent_paths = self.normalizeRecentFilePaths(
+            settings.value('psysummary_recent_files', []))
+
+        if recent_paths:
+            for file_path in recent_paths[:20]:
+                action = self.open_recent_menu.addAction(file_path)
+                action.setToolTip(file_path)
+                action.setEnabled(os.path.isfile(file_path))
+                if action.isEnabled():
+                    action.triggered.connect(
+                        lambda checked=False, recent_file=file_path: self.openDataFiles([recent_file]))
+            self.open_recent_menu.addSeparator()
+        else:
+            empty_action = self.open_recent_menu.addAction('No Recent Files')
+            empty_action.setEnabled(False)
+            self.open_recent_menu.addSeparator()
+
+        clear_action = self.open_recent_menu.addAction('Clear Items')
+        clear_action.setEnabled(bool(recent_paths))
+        clear_action.triggered.connect(self.clearRecentFiles)
+
+    def clearRecentFiles(self):
+        """Clear PsySummary's recent data-file history."""
+        Settings(Info.ConfigFile, QSettings.IniFormat).setValue('psysummary_recent_files', [])
+        self.refreshOpenRecentMenu()
 
     def readMatlabFilesMThread(self, fileList):
         """
@@ -424,6 +589,7 @@ drag the variable back to the variable list.
                 self.dataReadStart = True
 
             self.data = pd.concat([self.data, data], ignore_index=True)
+            self.updateRecentFiles(fileList)
 
         self.readMatThreads[fileType].wait()
         PsyDataFunc.genScript(PsyDataFunc.list2Script(fileList, 'fileList'))
@@ -438,17 +604,25 @@ drag the variable back to the variable list.
             self.clearAllListAndSetData()
 
     def decodingFileOKPressedEvent(self):
-        self.data = self.import_file.readFinalData()
+        self.import_file.readFinalData()
 
+    def decodingFileDataReady(self, data):
+        """Apply imported data after background file reading."""
+        self.data = data
+        for file_path in self.import_file.files:
+            self.printLogInfo(f"Reading file: {file_path}", 0)
+        self.updateRecentFiles(self.import_file.files)
         self.import_file.acceptEvent()
         self.clearAllListAndSetData()
 
         text_format, delimiter = self.import_file.getFormatAndDelimiter()
         PsyDataFunc.genScript(PsyDataFunc.list2Script(self.import_file.files, 'fileList'))
-        PsyDataFunc.genScript(
-            f"aggData.readDatFiles(fileList, {self.import_file.getContainHeadStatus()},'{text_format}', '{delimiter}')")
+        PsyDataFunc.genScript(f"aggData.readDatFiles(fileList, {self.import_file.getContainHeadStatus()},'{text_format}', '{delimiter}')")
 
     def clearAllListAndSetData(self):
+        if self.data is None:
+            return
+
         self.dataReadStart = False
         self.clearAllList()
 
@@ -504,14 +678,15 @@ drag the variable back to the variable list.
     # 读取多个文件
     def readMultipleFiles(self, fileList):
         all_dfs = []
+        loaded_files = []
         try:
             for file in fileList:
                 df = self.readFile(file)
-                fileName = os.path.basename(file)
-                df = df.assign(fileName=fileName)
                 if df is not None:
                     all_dfs.append(df)
+                    loaded_files.append(file)
             if all_dfs:
+                all_dfs, _source_column = addSourceFileColumn(all_dfs, loaded_files)
                 return pd.concat(all_dfs, ignore_index=True)
             else:
                 return None
@@ -532,6 +707,7 @@ drag the variable back to the variable list.
             self.variablesNameList = self.data.columns.tolist()
             self.variables_list.addItems(self.variablesNameList)
             self.variables_list.sortItems(Qt.AscendingOrder)
+            self.data_list.setModelContext(self.data, self.getFilteredDataFrame)
 
     # 显示打开文件的table
     def showDataTable(self):
@@ -554,10 +730,68 @@ drag the variable back to the variable list.
             return False
         # try:
         self.filterWindow = FilterWindow(self.data, self.filter_list)
+        self.filterWindow.previewRequested.connect(self.showDistributionPreview)
         self.filterWindow.show()
+
+    def showDistributionPreview(self):
+        """Open a before/after visualization using the active PsySummary filters."""
+        if self.model_fit_running:
+            self._showModelFitBusyMessage('previewing filter effects')
+            return False
+        if self.data is None or self.data.empty:
+            MessageBox.information(self, 'Warning', 'No data exist, please load data first.')
+            return False
+        try:
+            row_variables = getListWidgetData(self.rows_list)
+            column_variables = getListWidgetData(self.columns_list)
+            data_items = getListWidgetData(self.data_list)
+            target_variables = []
+            for item in data_items:
+                variable = item.split('@', 1)[0]
+                if (variable not in target_variables and variable in self.data.columns
+                        and pd.to_numeric(self.data[variable], errors='coerce').notna().any()):
+                    target_variables.append(variable)
+            if not target_variables:
+                MessageBox.information(
+                    self,
+                    'Warning',
+                    'No numeric Data variable is defined. Drag at least one numeric variable into '
+                    'the Data area before opening Distribution Preview.')
+                return False
+
+            rules = self.getFilterList()
+            marker = '__psysummary_preview_row_id__'
+            while marker in self.data.columns:
+                marker += '_'
+
+            preview_source = self.data.copy()
+            preview_source[marker] = np.arange(len(preview_source), dtype=int)
+            retained_data = StatisticTool.filterData(
+                row_variables, column_variables, preview_source, rules,
+                record_script=False)
+            retained_ids = set(retained_data[marker].astype(int).tolist())
+            retained_mask = preview_source[marker].isin(retained_ids).to_numpy(dtype=bool)
+            preview_source = preview_source.drop(columns=[marker])
+
+            self.distributionPreviewWindow = DistributionPreviewDialog(
+                preview_source,
+                retained_mask,
+                target_variables=target_variables,
+                row_facets=row_variables,
+                column_facets=column_variables,
+                parent=self,
+            )
+            self.distributionPreviewWindow.show()
+            return True
+        except Exception as error:
+            MessageBox.warning(self, 'Distribution Preview Error', str(error))
+            return False
 
     # 运行分析程序
     def runSummary(self):
+        if self.model_fit_running:
+            self._showModelFitBusyMessage()
+            return None
         if self.data is None:
             MessageBox.information(self, 'Warning', "No data exist, please load data first.")
             return None
@@ -565,7 +799,7 @@ drag the variable back to the variable list.
         try:
             rowList = getListWidgetData(self.rows_list)
             columnList = getListWidgetData(self.columns_list)
-            dataList = getListWidgetData(self.data_list)
+            dataList = getDataListEntries(self.data_list)
 
             if not dataList:
                 MessageBox.information(
@@ -576,43 +810,331 @@ drag the variable back to the variable list.
                 return None
 
             items = self.getFilterList()
+            contains_model_fit = any(
+                split_target(target)[1] in MODEL_FIT_METHODS
+                for target in dataList)
 
-            self.pivotTableWindow = PivotedDataWidget(self.data, rowList, columnList, dataList, items)
+            model_targets = [split_target(target) for target in dataList
+                             if split_target(target)[1] in COGNITIVE_MODEL_NAMES]
+            if model_targets:
+                filtered = self.getFilteredDataFrame()
+                problems = []
+                for variable, model, specification in model_targets:
+                    try:
+                        if not specification:
+                            raise ValueError('Open Model Settings to configure this model.')
+                        validate_model_data(specification, filtered, rowList + columnList)
+                    except (TypeError, ValueError, KeyError) as error:
+                        problems.append(f'{variable}@{model}:\n{error}')
+                if problems:
+                    MessageBox.warning(self, 'Invalid Model Settings', '\n\n'.join(problems))
+                    return None
 
-            main_gui_topLeft = self.getGlobalPosition()
-            self.pivotTableWindow.move(main_gui_topLeft.x() + self.frameGeometry().width(), main_gui_topLeft.y())
-
-            self.pivotTableWindow.show()
+            if contains_model_fit:
+                self.model_fit_running = True
+                self._startModelFitOverlay()
+            result_widget = PivotedDataWidget(
+                self.data, rowList, columnList, dataList, items)
+            if contains_model_fit:
+                self._pending_result_widget = result_widget
+                result_widget.analysisFinished.connect(
+                    lambda widget=result_widget: self._modelFitFinished(widget))
+                result_widget.analysisFailed.connect(
+                    lambda message, widget=result_widget:
+                    self._modelFitFailed(widget, message))
+                if hasattr(result_widget, 'analysisCancelled'):
+                    result_widget.analysisCancelled.connect(
+                        lambda widget=result_widget: self._modelFitCancelled(widget))
+                if hasattr(result_widget, 'analysisProgress'):
+                    result_widget.analysisProgress.connect(self._modelFitProgress)
+            else:
+                self._showAggregationResults(result_widget)
         except Exception as e:
+            self.model_fit_running = False
+            self._pending_result_widget = None
+            self._stopModelFitOverlay()
             MessageBox.information(self, 'Warning', f"{e}")
             traceback.print_exc()
             return None
 
-    def contingentPivotTableWindow(self):
-        if self.pivotTableWindow and self.pivotTableWindow.isVisible():
-            main_gui_topLeft = self.getGlobalPosition()
-            self.pivotTableWindow.move(main_gui_topLeft.x() + self.frameGeometry().width(), main_gui_topLeft.y())
+    def _showModelFitBusyMessage(self, action='starting another analysis'):
+        """Show the active-fit notice at a stable two-line width."""
+        dialog = MessageBox(self)
+        dialog.setIcon(QMessageBox.Information)
+        dialog.setWindowTitle('Model Fitting in Progress')
+        dialog.setText(
+            'A model is currently being fitted in the background.\n'
+            f'Please wait for it to finish before {action}.')
+        dialog.setStandardButtons(QMessageBox.Ok)
+        dialog.setMinimumWidth(540)
+        dialog.setStyleSheet('QLabel { min-width: 500px; }')
+        self._model_fit_message_box = dialog
+        dialog.exec_()
 
-    def eventFilter(self, source, event):
-        # 当主窗口移动时，实时同步移动另一个窗口
-        if source == self and event.type() == QEvent.Move:
-            self.contingentPivotTableWindow()
-        return super().eventFilter(source, event)
+    def _startModelFitOverlay(self):
+        """Cover PsySummary with a localized spinner while a model queue runs."""
+        self._menu_enabled_before_model_fit = self.menuBar().isEnabled()
+        self.menuBar().setEnabled(False)
+        self.model_fit_overlay.start()
+
+    def _modelFitProgress(self, current, total, label):
+        """Update the overlay only when the fitting queue starts another model."""
+        if self.model_fit_running:
+            self.model_fit_overlay.setProgress(current, total, label)
+
+    def _stopModelFitOverlay(self):
+        """Restore normal interaction after a model queue reaches a terminal state."""
+        if (not hasattr(self, 'model_fit_overlay')
+                or (self.model_fit_overlay.isHidden()
+                    and not self.model_fit_overlay.animation_timer.isActive())):
+            return
+        self.model_fit_overlay.stop()
+        self.menuBar().setEnabled(self._menu_enabled_before_model_fit)
+
+    def _modelFitFinished(self, result_widget):
+        """Reveal a completed background result and clear the run guard."""
+        if self._pending_result_widget is not result_widget:
+            return
+        self.model_fit_running = False
+        self._pending_result_widget = None
+        self._stopModelFitOverlay()
+        self._showAggregationResults(result_widget)
+
+    def _modelFitFailed(self, result_widget, message):
+        """Discard a failed pending result while preserving any previous result."""
+        if self._pending_result_widget is not result_widget:
+            return
+        self.model_fit_running = False
+        self._pending_result_widget = None
+        self._stopModelFitOverlay()
+        result_widget.deleteLater()
+        MessageBox.warning(self, 'Model Fitting Error', message)
+
+    def _modelFitCancelled(self, result_widget):
+        """Discard a cancelled pending fit and finish a requested window close."""
+        if self._pending_result_widget is not result_widget:
+            return
+        self.model_fit_running = False
+        self._pending_result_widget = None
+        self._stopModelFitOverlay()
+        PsyDataFunc.printOut('Model fitting cancelled.', 4, False)
+        result_widget.deleteLater()
+        if self._closing_after_model_cancel:
+            self._closing_after_model_cancel = False
+            QTimer.singleShot(0, self.close)
+
+    def _showAggregationResults(self, result_widget):
+        """Replace and reveal the fixed right-side aggregation-results dock."""
+        previous_widget = self.results_dock.widget()
+        if previous_widget is not None and previous_widget is not result_widget:
+            diagnostics = getattr(previous_widget, 'fit_diagnostics_dialog', None)
+            if diagnostics is not None:
+                diagnostics.close()
+            previous_widget.setParent(None)
+            previous_widget.deleteLater()
+
+        self.pivotTableWindow = result_widget
+        self.results_dock.setWidget(result_widget)
+        self.results_action.setEnabled(True)
+        self.results_toggle_button.setEnabled(True)
+        self._setAggregationResultsVisible(True)
+
+    def _toggleAggregationResults(self):
+        """Toggle the aggregation-results drawer from the central boundary button."""
+        self._setAggregationResultsVisible(self.results_dock.isHidden())
+
+    def _setAggregationResultsVisible(self, visible):
+        """Show or hide results while preserving the Data Summary layout width."""
+        if visible and self.pivotTableWindow is None:
+            self._syncAggregationResultsControls()
+            return
+        if bool(visible) == (not self.results_dock.isHidden()):
+            self._syncAggregationResultsControls()
+            return
+
+        if visible:
+            self._resizeWindowForAggregationResults(True)
+            self._results_transition = True
+            try:
+                self.results_dock.show()
+                self.results_dock.raise_()
+                self.resizeDocks(
+                    [self.results_dock], [self._results_dock_width], Qt.Horizontal)
+            finally:
+                self._results_transition = False
+        else:
+            self._rememberAggregationResultsWidth()
+            self._results_transition = True
+            try:
+                self.results_dock.hide()
+            finally:
+                self._results_transition = False
+            self._deferAggregationResultsCollapse()
+        self._syncAggregationResultsControls()
+
+    def _aggregationResultsVisibilityChanged(self, _visible):
+        """Handle title-bar closes and keep all Results visibility controls synchronized."""
+        if self._closing or self._results_transition:
+            return
+        explicitly_visible = not self.results_dock.isHidden()
+        if explicitly_visible:
+            self._resizeWindowForAggregationResults(True)
+            self.resizeDocks(
+                [self.results_dock], [self._results_dock_width], Qt.Horizontal)
+        else:
+            self._rememberAggregationResultsWidth()
+            self._deferAggregationResultsCollapse()
+        self._syncAggregationResultsControls()
+
+    def _deferAggregationResultsCollapse(self):
+        """Shrink after Qt removes the hidden dock from the main-window layout."""
+        QTimer.singleShot(0, self._completeAggregationResultsCollapse)
+
+    def _completeAggregationResultsCollapse(self):
+        """Finish a pending collapse only if Results is still explicitly hidden."""
+        if self._closing or not self.results_dock.isHidden():
+            return
+        self.layout().activate()
+        self._resizeWindowForAggregationResults(False)
+        self._syncAggregationResultsControls()
+
+    def _rememberAggregationResultsWidth(self):
+        """Remember the user's latest dock width for the next expansion."""
+        if self.results_dock.width() > 0:
+            self._results_dock_width = self.results_dock.width()
+
+    def _aggregationResultsExtent(self):
+        """Return the horizontal space occupied by the Results dock and its separator."""
+        separator = self.style().pixelMetric(QStyle.PM_DockWidgetSeparatorExtent)
+        return max(1, self._results_dock_width) + max(0, separator)
+
+    def _resizeWindowForAggregationResults(self, expanded):
+        """Pair drawer visibility with an outer-window resize in normal window mode."""
+        if self.isMaximized() or self.isFullScreen():
+            return
+        if expanded == self._results_geometry_expanded:
+            return
+
+        extent = self._aggregationResultsExtent()
+        available = QApplication.desktop().availableGeometry(self)
+        if expanded:
+            self._results_collapsed_width = self.width()
+            target_width = min(self.width() + extent, available.width())
+            target_x = min(self.x(), available.right() - target_width + 1)
+            self._results_window_resizing = True
+            try:
+                self.resize(target_width, self.height())
+                self.move(max(available.left(), target_x), self.y())
+            finally:
+                self._results_window_resizing = False
+        else:
+            target_width = (
+                self._results_collapsed_width
+                if self._results_collapsed_width is not None
+                else self.width() - extent
+            )
+            self._results_window_resizing = True
+            try:
+                self.resize(max(self.minimumWidth(), target_width), self.height())
+            finally:
+                self._results_window_resizing = False
+        self._results_geometry_expanded = expanded
+
+    def resizeEvent(self, event):
+        """Track user resizing so the collapsed Data Summary width remains current."""
+        super().resizeEvent(event)
+        if hasattr(self, 'model_fit_overlay'):
+            self.model_fit_overlay.syncGeometry()
+        if (self._closing or self._results_transition or self._results_window_resizing
+                or self.isMaximized() or self.isFullScreen()
+                or not hasattr(self, 'results_dock')):
+            return
+        if self.pivotTableWindow is None or self.results_dock.isHidden():
+            self._results_collapsed_width = event.size().width()
+        elif self._results_geometry_expanded:
+            self._results_collapsed_width = max(
+                self.minimumWidth(),
+                event.size().width() - self._aggregationResultsExtent(),
+            )
+
+    def _syncAggregationResultsControls(self):
+        """Update arrow direction and View-menu state without recursive signals."""
+        available = self.pivotTableWindow is not None
+        expanded = available and not self.results_dock.isHidden()
+        self.results_toggle_button.setVisible(available)
+        self.results_toggle_button.setEnabled(available)
+        self.results_toggle_button.setText('《' if expanded else '》')
+        self.results_toggle_button.setToolTip(
+            'Collapse Aggregation Results.' if expanded else
+            'Expand Aggregation Results.' if available else
+            'Run an analysis to create Aggregation Results.')
+        self.results_action.setEnabled(available)
+        blocked = self.results_action.blockSignals(True)
+        self.results_action.setChecked(expanded)
+        self.results_action.blockSignals(blocked)
+
+    def changeEvent(self, event):
+        """Reconcile paired Results geometry after leaving maximized or full-screen mode."""
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange:
+            QTimer.singleShot(0, self._reconcileAggregationResultsGeometry)
+
+    def _reconcileAggregationResultsGeometry(self):
+        """Apply a deferred drawer resize after the window returns to normal mode."""
+        if self._closing or self.isMaximized() or self.isFullScreen():
+            return
+        expanded = self.pivotTableWindow is not None and not self.results_dock.isHidden()
+        self._resizeWindowForAggregationResults(expanded)
+        self._syncAggregationResultsControls()
 
     def closeEvent(self, event):
+        if self.model_fit_running:
+            if self._closing_after_model_cancel:
+                event.ignore()
+                return
+            if not self._confirmStopModelFit():
+                event.ignore()
+                return
+            if self.model_fit_running:
+                pending_result = self._pending_result_widget
+                if pending_result is not None:
+                    self._closing_after_model_cancel = True
+                    pending_result.cancelAnalysis()
+                    event.ignore()
+                    return
+                self.model_fit_running = False
+        self._closing = True
         if self.pivotTableWindow:
-            self.pivotTableWindow.close()
+            diagnostics = getattr(self.pivotTableWindow, 'fit_diagnostics_dialog', None)
+            if diagnostics is not None:
+                diagnostics.close()
         if self.filterWindow:
             self.filterWindow.close()
         if self.computationVariableGui:
             self.computationVariableGui.close()
+        if self.distributionPreviewWindow:
+            self.distributionPreviewWindow.close()
         super().closeEvent(event)
 
-    def getGlobalPosition(self):
-        # Get the frame geometry, which includes the toolbar and window decorations
-        global_pos = self.frameGeometry().topLeft()
-
-        return global_pos
+    def _confirmStopModelFit(self):
+        """Ask whether an active background fit should be cancelled before closing."""
+        dialog = MessageBox(self)
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setWindowTitle('Stop Model Fitting?')
+        dialog.setText(
+            'Model fitting is in progress.\n'
+            'Stop fitting and close PsySummary?')
+        stop_button = dialog.addButton(
+            'Stop and Close', QMessageBox.DestructiveRole)
+        continue_button = dialog.addButton(
+            'Keep Fitting', QMessageBox.RejectRole)
+        dialog.setDefaultButton(continue_button)
+        dialog.setEscapeButton(continue_button)
+        dialog.setStyleSheet(
+            'QLabel#qt_msgbox_label { min-width: 320px; max-width: 380px; }')
+        self._model_fit_close_message_box = dialog
+        dialog.exec_()
+        return dialog.clickedButton() is stop_button
 
     def transformVariable(self, newVariableName):
         self.variablesNameList.append(newVariableName)
@@ -623,11 +1145,33 @@ drag the variable back to the variable list.
     def clickCloseEvent(self):
         self.close()
 
+    def _setupDirectory(self):
+        """Return the last valid PsySummary Setup directory or a stable fallback."""
+        saved_directory = Settings(Info.ConfigFile, QSettings.IniFormat).value(
+            PSYSUMMARY_SETUP_DIRECTORY_KEY, '')
+        if isinstance(saved_directory, str) and saved_directory:
+            saved_directory = os.path.abspath(os.path.expanduser(saved_directory))
+            if os.path.isdir(saved_directory):
+                return saved_directory
+        if Info.FILE_DIRECTORY and os.path.isdir(Info.FILE_DIRECTORY):
+            return Info.FILE_DIRECTORY
+        return Info.UserPath
+
+    @staticmethod
+    def _rememberSetupDirectory(file_path):
+        """Persist the directory containing a successfully saved or loaded Setup file."""
+        directory = os.path.dirname(os.path.abspath(file_path))
+        settings = Settings(Info.ConfigFile, QSettings.IniFormat)
+        settings.setValue(PSYSUMMARY_SETUP_DIRECTORY_KEY, directory)
+        settings.sync()
+
     def loadFilterEvent(self):
         try:
-            file_path, _ = QFileDialog.getOpenFileName(self, 'Open File', '', 'PsySum Files (*.psysum)')
+            file_path, _ = QFileDialog.getOpenFileName(
+                self, 'Load Setup', self._setupDirectory(),
+                'PsySum Files (*.psysum)')
             if file_path:
-                with open(file_path, 'r') as file:
+                with open(file_path, 'r', encoding='utf-8') as file:
                     lines = file.readlines()
                     rowListString = lines[0].strip()
                     columnListString = lines[1].strip()
@@ -638,11 +1182,18 @@ drag the variable back to the variable list.
                     columnList = parseStringToList(columnListString)
                     dataList = parseStringToList(dataListString)
                     filterList = parseStringToList(filterListString)
+                    modelSpecifications = {}
+                    for line in lines[4:]:
+                        if line.startswith('modelSpecifications:'):
+                            modelSpecifications = parseStringToList(line) or {}
+                            break
 
                     setListWidgetData(self.rows_list, rowList)
                     setListWidgetData(self.columns_list, columnList)
                     setListWidgetData(self.data_list, dataList)
+                    self.data_list.restoreModelSpecifications(modelSpecifications)
                     setListWidgetData(self.filter_list, filterList)
+                    self._rememberSetupDirectory(file_path)
 
         except Exception as e:
             self.printLogInfo(f"Error in reading file:{e}", 3)
@@ -660,31 +1211,49 @@ drag the variable back to the variable list.
             items.append(item.text())
         return items
 
-    def getFilteredDataFrame(self):
-        df = self.data
-
+    def getFilteredDataFrame(self, record_script=False):
+        """Return retained rows, optionally recording reusable filter parameters."""
         items = self.getFilterList()
 
-        if len(items) != 0:
+        if items:
             rowList = getListWidgetData(self.rows_list)
             columnList = getListWidgetData(self.columns_list)
-
-            df = StatisticTool.filterData(rowList, columnList, self.data, items)
-        return df
+            # filterData owns the one defensive working copy needed to keep self.data unchanged.
+            return StatisticTool.filterData(
+                rowList, columnList, self.data, items,
+                record_script=record_script)
+        if record_script:
+            PsyDataFunc.genScript('cdfPoolingOmegas = []')
+        # Export and the read-only data viewer do not mutate the loaded DataFrame.
+        return self.data
 
     # 保存预设的.psydata文件
     def saveFilteredData(self):
-        df = self.getFilteredDataFrame()
+        filtered_copy = self.getFilteredDataFrame(record_script=True)
 
         try:
-            file_path, _ = QFileDialog.getSaveFileName(self, 'Save File', '', 'psyData Files (*.psydata)')
+            file_path, selected_filter = QFileDialog.getSaveFileName(
+                self,
+                'Save Filtered Data',
+                '',
+                'CSV Files (*.csv);;psyData Files (*.psydata)')
             if file_path:
-                df.to_csv(file_path, sep='|', quoting=csv.QUOTE_NONNUMERIC, index=False, header=True)
-                # filterDataOnly(self, row_vars, col_vars, ruleList):
-                PsyDataFunc.genScript(
-                    f"filteredDataFrame = aggData.filterData(rowVariables, colVariables, ruleList, cdfPoolingOmegas)")
-                PsyDataFunc.genScript(
-                    f"filteredDataFrame.to_csv('{file_path}', sep='|', quoting=csv.QUOTE_NONNUMERIC, index=False, header=True)")
+                extension = os.path.splitext(file_path)[1].lower()
+                if extension not in {'.csv', '.psydata'}:
+                    extension = '.psydata' if 'psyData' in selected_filter else '.csv'
+                    file_path += extension
+
+                PsyDataFunc.genScript(f"filteredDataFrame = aggData.filterData(rowVariables, colVariables, ruleList, cdfPoolingOmegas)")
+                if extension == '.csv':
+                    filtered_copy.to_csv(file_path, index=False, header=True)
+                    PsyDataFunc.genScript(
+                        f"filteredDataFrame.to_csv({file_path!r}, index=False, header=True)")
+                else:
+                    filtered_copy.to_csv(
+                        file_path, sep='|', quoting=csv.QUOTE_NONNUMERIC, index=False, header=True)
+                    PsyDataFunc.genScript(
+                        f"filteredDataFrame.to_csv({file_path!r}, sep='|', quoting=csv.QUOTE_NONNUMERIC, "
+                        f"index=False, header=True)")
         except Exception as e:
             self.printLogInfo(f"Error in saving filtered data:{e}", 3)
             return None
@@ -699,8 +1268,7 @@ drag the variable back to the variable list.
                 # 将数组数据保存到文件中
                 self.data.to_csv(file_path, sep='|', quoting=csv.QUOTE_NONNUMERIC, index=False, header=True)
 
-                PsyDataFunc.genScript(
-                    f"aggData.data.to_csv('{file_path}', sep='|', quoting=csv.QUOTE_NONNUMERIC, index=False, header=True)")
+                PsyDataFunc.genScript(f"aggData.data.to_csv('{file_path}', sep='|', quoting=csv.QUOTE_NONNUMERIC, index=False, header=True)")
         except Exception as e:
             self.printLogInfo(f"Error in saving file:{e}", 3)
             return None
@@ -710,27 +1278,37 @@ drag the variable back to the variable list.
         columnList = getListWidgetData(self.columns_list)
         rowList = getListWidgetData(self.rows_list)
         dataList = getListWidgetData(self.data_list)
+        modelSpecifications = self.data_list.modelSpecifications()
         filterList = getListWidgetData(self.filter_list)
 
         if self.data is None:
             MessageBox.information(self, 'Warning', "No data exist, please load data first.")
             return False
         try:
-            file_path, _ = QFileDialog.getSaveFileName(self, 'Save File', '', 'PsySum Files (*.psysum)')
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, 'Save Setup', self._setupDirectory(),
+                'PsySum Files (*.psysum)')
             if file_path:
+                if os.path.splitext(file_path)[1].lower() != '.psysum':
+                    file_path += '.psysum'
                 # 将数组数据保存到文件中
-                with open(file_path, 'w') as file:
+                with open(file_path, 'w', encoding='utf-8') as file:
                     file.write(f'rowList: {rowList}\n')
                     file.write(f'columnList: {columnList}\n')
                     file.write(f'dataList: {dataList}\n')
                     file.write(f'filterList: {filterList}\n')
+                    file.write(f'modelSpecifications: {modelSpecifications!r}\n')
+                self._rememberSetupDirectory(file_path)
         except Exception as e:
             MessageBox.warning(self, "Save file error", f"{e}")
             return None
 
     # @staticmethod
     def printLogInfo(self, infoText, infoType: int = 0):
-        PsyDataFunc.printOut(infoText, infoType)
+        if self.plugin_mode:
+            Func.printOut(infoText, infoType)
+        else:
+            PsyDataFunc.printOut(infoText, infoType)
 
     def handleThreadSignal(self, infoType: int, infoText: str):
         self.printLogInfo(infoText, infoType)

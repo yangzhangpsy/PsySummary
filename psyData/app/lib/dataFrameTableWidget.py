@@ -1,10 +1,10 @@
 import sys
 import pandas as pd
 
-from PyQt5.QtWidgets import QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QHeaderView, QApplication, QMainWindow, QTableView, QAbstractItemView
-from PyQt5.QtCore import QAbstractTableModel, Qt, QModelIndex
-
-from app.psyDataFunc import PsyDataFunc
+from app.psyDataFunc import PsyDataFunc as Func
+from PyQt5.QtWidgets import QTableWidget, QTableWidgetItem, QVBoxLayout, QHBoxLayout, QWidget, QLabel, QPushButton, \
+    QHeaderView, QApplication, QMainWindow, QTableView, QAbstractItemView
+from PyQt5.QtCore import QAbstractTableModel, Qt, QModelIndex, pyqtSignal
 
 
 class PandasModel(QAbstractTableModel):
@@ -12,8 +12,6 @@ class PandasModel(QAbstractTableModel):
         super(PandasModel, self).__init__(parent)
         self.start_col = 0
         self.start_row = 0
-        self.end_col = -1
-        self.end_row = -1
 
         self._df = inputDF
         self._viewport_data = pd.DataFrame()
@@ -28,14 +26,9 @@ class PandasModel(QAbstractTableModel):
         if not index.isValid():
             return None
         if role == Qt.DisplayRole:
-            row = index.row()
-            col = index.column()
-
-            if self.start_row <= row <= self.end_row and self.start_col <= col <= self.end_col and not self._viewport_data.empty:
-                value = self._viewport_data.iat[row - self.start_row, col - self.start_col]
-            else:
-                value = self._df.iat[row, col]
-            return str(value)
+            if not self._viewport_data.empty:
+                value = self._viewport_data.iat[index.row() - self.start_row, index.column() - self.start_col]
+                return str(value)
         # if role == Qt.BackgroundRole:
         #     return QColor(Qt.white)
         return None
@@ -49,28 +42,12 @@ class PandasModel(QAbstractTableModel):
         return None
 
     def updateViewportData(self, start_row, end_row, start_col, end_col):
-        if self._df.empty:
-            self.start_row = 0
-            self.start_col = 0
-            self.end_row = -1
-            self.end_col = -1
-            self._viewport_data = pd.DataFrame()
-            return
-
-        start_row = max(start_row, 0)
-        start_col = max(start_col, 0)
-        end_row = min(max(end_row, start_row), self.rowCount() - 1)
-        end_col = min(max(end_col, start_col), self.columnCount() - 1)
-
-        if (start_row, end_row, start_col, end_col) == (self.start_row, self.end_row, self.start_col, self.end_col):
-            return
-
         self.start_col = start_col
         self.start_row = start_row
-        self.end_row = end_row
-        self.end_col = end_col
 
-        self._viewport_data = self._df.iloc[start_row:end_row + 1, start_col:end_col + 1]
+        self.beginResetModel()
+        self._viewport_data = self._df.iloc[start_row:end_row + 1, start_col:end_col + 1].copy()
+        self.endResetModel()
 
 
 class DataFrameTableWidget(QMainWindow):
@@ -84,7 +61,7 @@ class DataFrameTableWidget(QMainWindow):
 
     def initUI(self):
         self.setWindowTitle('Data Viewer')
-        self.setWindowIcon(PsyDataFunc.getImageObject("icon.png", type=1))
+        self.setWindowIcon(Func.getImageObject("icon.png", type=1))
         self.setWindowFlag(Qt.WindowStaysOnTopHint)
         self.resize(800, 600)
 
@@ -98,7 +75,7 @@ class DataFrameTableWidget(QMainWindow):
         self.view.setHorizontalScrollMode(QTableView.ScrollPerPixel)
         self.view.viewport().installEventFilter(self)
 
-        # Set the table view as the main window central widget
+        # 设置表格视图为主窗口的中央部件
         layout = QVBoxLayout()
         layout.addWidget(self.view)
 
@@ -139,21 +116,125 @@ class DataFrameTableWidget(QMainWindow):
 
 
 class ResultFrameTableWidget(QTableWidget):
-    def __init__(self, dfs, columns, index, targetLst):
+    fitRecordActivated = pyqtSignal(object)
+
+    def __init__(self, dfs, columns, index, targetLst, fit_records=None):
         super().__init__()
         self.dfs = dfs
         self.columns = columns
         self.index = index
         self.targetLst = targetLst
         self.dataValues = dict()
+        self.fit_records = fit_records or []
+        self.fitRecordCells = {}
+        self.fitValueLabels = {}
 
         self.setWindowTitle('Result View')
-        self.setWindowIcon(PsyDataFunc.getImageObject("icon.png", type=1))
+        self.setWindowIcon(Func.getImageObject("icon.png", type=1))
         self.setFocusPolicy(Qt.NoFocus)
         self.setSelectionMode(QAbstractItemView.NoSelection)
         self.setAlternatingRowColors(True)
         self.resize(600, 400)
         self.initUI()
+        self.cellDoubleClicked.connect(self._activate_fit_record)
+
+    @staticmethod
+    def _format_value(value, decimal_num=4):
+        """Format numeric results while preserving textual fit diagnostics."""
+        if pd.api.types.is_number(value) and not isinstance(value, bool):
+            if pd.isna(value):
+                return 'NA'
+            numeric_value = float(value)
+            if numeric_value % 1:
+                return f"{numeric_value:.{decimal_num}f}"
+            return f"{numeric_value:.0f}"
+        return str(value)
+
+    @staticmethod
+    def _tuple_value(value):
+        """Normalize a scalar or multi-index value to a tuple."""
+        return value if isinstance(value, tuple) else (value,)
+
+    @staticmethod
+    def _same_group_value(left, right):
+        """Compare grouping values while treating paired missing values as equal."""
+        try:
+            if pd.isna(left) and pd.isna(right):
+                return True
+        except (TypeError, ValueError):
+            pass
+        return left == right
+
+    def _record_for_result_cell(self, target_label, dataframe, source_row, source_col):
+        """Resolve a displayed result cell to its fitted model and group."""
+        candidates = [
+            record for record in self.fit_records
+            if target_label.startswith(f"{record.get('result_prefix', '')} ")
+        ]
+        if not candidates:
+            return None
+        if not candidates[0].get('group_vars'):
+            return candidates[0]
+
+        group_values = ()
+        if self.index:
+            group_values += self._tuple_value(dataframe.index[source_row])
+        if self.columns:
+            group_values += self._tuple_value(dataframe.columns[source_col])
+        for record in candidates:
+            record_values = record.get('group_values', ())
+            if len(record_values) == len(group_values) and all(
+                    self._same_group_value(left, right)
+                    for left, right in zip(record_values, group_values)):
+                return record
+        return None
+
+    def _register_fit_cell(self, table_row, table_col, target_label, dataframe, source_row, source_col):
+        """Mark a fitted result cell as an entry point to its diagnostics plot."""
+        record = self._record_for_result_cell(target_label, dataframe, source_row, source_col)
+        if record is None:
+            return
+        self.fitRecordCells[(table_row, table_col)] = record
+        item = self.item(table_row, table_col)
+        if item is not None:
+            item.setToolTip('Double-click to view fitted PDF and CDF diagnostics.')
+        if target_label.endswith(' Converged'):
+            self._add_fit_button(table_row, table_col, record)
+
+    def _add_fit_button(self, table_row, table_col, record):
+        """Add an explicit diagnostics button beside the convergence value."""
+        item = self.item(table_row, table_col)
+        if item is None:
+            return
+        cell_widget = QWidget(self)
+        layout = QHBoxLayout(cell_widget)
+        layout.setContentsMargins(4, 1, 4, 1)
+        layout.setSpacing(6)
+        value_label = QLabel(item.text(), cell_widget)
+        item.setText('')
+        self.fitValueLabels[(table_row, table_col)] = value_label
+        fit_button = QPushButton('View Fit', cell_widget)
+        fit_button.setToolTip('Open fitted PDF and CDF diagnostics for this group.')
+        fit_button.setFixedHeight(24)
+        fit_button.clicked.connect(
+            lambda _checked=False, fit_record=record: self.fitRecordActivated.emit(fit_record))
+        layout.addWidget(value_label)
+        layout.addWidget(fit_button)
+        self.setCellWidget(table_row, table_col, cell_widget)
+
+    def _activate_fit_record(self, row, column):
+        """Open fit diagnostics when a mapped result cell is double-clicked."""
+        record = self.fitRecordCells.get((row, column))
+        if record is not None:
+            self.fitRecordActivated.emit(record)
+
+    def cellText(self, row, column):
+        """Return the visible value of a cell, including values hosted by cell widgets."""
+        value_label = self.fitValueLabels.get((row, column))
+        if value_label is not None:
+            return value_label.text()
+        item = self.item(row, column)
+        return item.text() if item is not None else ''
 
     def initUI(self):
         self.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -164,7 +245,7 @@ class ResultFrameTableWidget(QTableWidget):
 
         total_rows = 0
         total_columns = 0
-        # If both index and columns are empty
+        # 如果 index 和 columns 都为空
         if self.columns == [] and self.index == []:
             total_rows = len(self.dfs) * 3
             self.setRowCount(total_rows)
@@ -176,12 +257,13 @@ class ResultFrameTableWidget(QTableWidget):
                 if cDF is None:
                     continue
 
-                item = QTableWidgetItem(str(self.targetLst[targetIndex]))
+                target_label = str(self.targetLst[targetIndex])
+                item = QTableWidgetItem(target_label)
                 # self.setItem(current_row, 0, item)
                 font = item.font()
                 font.setBold(True)
                 item.setFont(font)
-                # Reset the cell's QTableWidgetItem so the bold font is shown immediately
+                # 重新设置该单元格的 QTableWidgetItem，以便立即显示加粗字体
                 self.setItem(current_row, 0, item)
                 current_row += 1
 
@@ -190,13 +272,12 @@ class ResultFrameTableWidget(QTableWidget):
                 else:
                     cValue = cDF
 
-                if cValue % 1:
-                    cValueStr = f"{cValue:.4f}"
-                else:
-                    cValueStr = f"{cValue:.0f}"
+                cValueStr = self._format_value(cValue)
 
                 self.setItem(current_row, 0, QTableWidgetItem(cValueStr))
                 self.dataValues.update({(current_row, 0): cValue})
+                if isinstance(cDF, pd.DataFrame):
+                    self._register_fit_cell(current_row, 0, target_label, cDF, 0, 0)
 
                 current_row += 2
                 targetIndex += 1
@@ -205,26 +286,27 @@ class ResultFrameTableWidget(QTableWidget):
                 num_rows, num_columns = cDF.shape
                 total_rows += num_rows + len(self.columns) + 4
                 total_columns = max(num_columns + len(self.index), total_columns, num_columns + 1)
-            # Set the table dimensions
+            # 设置table行列值
             total_rows -= 2
             self.setRowCount(total_rows)
             self.setColumnCount(total_columns)
 
-            current_row = 0  # Current row index
+            current_row = 0  # 当前行的索引
             targetIndex = 0
             for cDF in self.dfs:
-                # Write the target label
-                item = QTableWidgetItem(str(self.targetLst[targetIndex]))
+                # 填入table信息
+                target_label = str(self.targetLst[targetIndex])
+                item = QTableWidgetItem(target_label)
                 # self.setItem(current_row, 0, item)
                 font = item.font()
                 font.setBold(True)
                 item.setFont(font)
 
-                # Reset the cell's QTableWidgetItem so the bold font is shown immediately
+                # 重新设置该单元格的 QTableWidgetItem，以便立即显示加粗字体
                 self.setItem(current_row, 0, item)
                 targetIndex += 1
                 current_row += 1
-                # Write column level names
+                # 填入 分类汇总 columns 名
                 if self.columns:
                     column_index = cDF.columns
                     column_lst = column_index.names
@@ -233,7 +315,7 @@ class ResultFrameTableWidget(QTableWidget):
                         if self.index:
                             column_pos = len(self.index) - 1
                         self.setItem(current_row + i, column_pos, QTableWidgetItem(str(column_lst[i])))
-                    # Write column header values
+                    # 填入 columns 具体的信息
                     count = column_pos + 1
                     for value in column_index:
                         if isinstance(value, (float, int, str, bool)):
@@ -241,14 +323,14 @@ class ResultFrameTableWidget(QTableWidget):
                         for index in range(len(value)):
                             self.setItem(current_row + index, count, QTableWidgetItem(str(value[index])))
                         count += 1
-                # Write row level names
+                # 填入 分类汇总index 名
                 current_row += len(self.columns)
                 if self.index:
                     index_index = cDF.index
                     index_lst = index_index.names
                     for i in range(len(index_lst)):
                         self.setItem(current_row, i, QTableWidgetItem(str(index_lst[i])))
-                    # Write row index values
+                    # 填入 index 具体的信息
                     current_row += 1
                     tmpIndex = current_row
                     for value in index_index:
@@ -261,9 +343,9 @@ class ResultFrameTableWidget(QTableWidget):
                         else:
                             self.setItem(tmpIndex, 0, QTableWidgetItem(str(value)))
                         tmpIndex += 1
-                # Fill the table body
+                # 填入具体的数据
                 # values = cDF.values
-                # Iterate over the 2D result array
+                # 遍历二维数组
                 index_pos = 1
                 if self.index:
                     index_pos = len(self.index)
@@ -271,15 +353,14 @@ class ResultFrameTableWidget(QTableWidget):
                 for row in range(cDF.shape[0]):
                     for col in range(cDF.shape[1]):
                         cValue = cDF.iat[row, col]
-                        if cValue % 1:
-                            cValueStr = f"{cValue:.4f}"
-                        else:
-                            cValueStr = f"{cValue:.0f}"
+                        cValueStr = self._format_value(cValue)
 
                         self.setItem(current_row + row, index_pos + col, QTableWidgetItem(cValueStr))
                         self.dataValues.update({(current_row + row, index_pos + col): cValue})
+                        self._register_fit_cell(
+                            current_row + row, index_pos + col, target_label, cDF, row, col)
 
-                # Advance to the next result table
+                # 跳到下一个表格
                 current_row += cDF.shape[0] + 1
 
     def updateTable(self, decimal_num: str):
@@ -291,20 +372,21 @@ class ResultFrameTableWidget(QTableWidget):
                 if locTuple in self.dataValues:
                     item = self.item(row, col)
                     cValue = self.dataValues[locTuple]
-
-                    if cValue % 1:
-                        item.setText(f"{cValue:.{decimal_num}f}")
+                    formatted_value = self._format_value(cValue, decimal_num)
+                    if locTuple in self.fitValueLabels:
+                        self.fitValueLabels[locTuple].setText(formatted_value)
+                        item.setText('')
                     else:
-                        item.setText(f"{cValue:.0f}")
+                        item.setText(formatted_value)
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
-    # Example DataFrame
-    data = {'Column1': range(1, 10001),  # Add more rows
-            'Column2': ['A'] * 10000,  # Add more columns
-            'Column3': [i * 0.1 for i in range(10000)]}  # Add more columns
+    # 示例DataFrame
+    data = {'Column1': range(1, 10001),  # 增加更多行
+            'Column2': ['A'] * 10000,  # 增加更多列
+            'Column3': [i * 0.1 for i in range(10000)]}  # 增加更多列
     df = pd.DataFrame(data)
 
     viewer = DataFrameTableWidget(df)

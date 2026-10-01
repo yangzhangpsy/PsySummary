@@ -6,9 +6,9 @@ import shutil
 
 from PyQt5.QtCore import QRegularExpression, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QFontDatabase, QSyntaxHighlighter, QTextCharFormat, QTextCursor
-from PyQt5.QtWidgets import QAction, QApplication, QFileDialog, QTextEdit
+from PyQt5.QtWidgets import QTextEdit, QAction, QApplication, QFileDialog
 
-from app.lib.dock_widget import DockWidget
+from app.lib import DockWidget
 
 
 INITIAL_SCRIPT = 'from aggregateData import AggregateData\naggData = AggregateData()'
@@ -72,7 +72,6 @@ class ScriptDock(DockWidget):
         self.real_visible = False
         self.scroll_bar = self.text_edit.verticalScrollBar()
         self.text_edit.setPlainText(INITIAL_SCRIPT)
-        # self.text_edit.append(f"<p>{information}</p>")
         self.setWidget(self.text_edit)
         self.visibilityChanged.connect(self.setRealVisible)
 
@@ -144,16 +143,18 @@ class OutputTextEdit(QTextEdit):
                     f.write(self.toPlainText())
 
                 # copy the aggregateData.py file
-                current_directory = os.path.join(
-                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'exportFiles')
-
+                current_directory = os.path.dirname(os.path.abspath(__file__))
                 output_path = os.path.dirname(export_full_filename)
 
-                sourceFile = os.path.join(current_directory, 'aggregateData.py')
+                sourceFile = os.path.join(current_directory, '..', 'exportFiles', 'aggregateData.py')
                 shutil.copyfile(sourceFile, os.path.join(output_path, 'aggregateData.py'))
 
-                sourceFile = os.path.join(current_directory, 'rtDist.py')
+                sourceFile = os.path.join(current_directory, '..', 'exportFiles', 'rtDist.py')
                 shutil.copyfile(sourceFile, os.path.join(output_path, 'rtDist.py'))
+
+                for helper_name in ('cognitiveModels.py', 'cognitiveModelSpec.py'):
+                    sourceFile = os.path.join(current_directory, '..', helper_name)
+                    shutil.copyfile(sourceFile, os.path.join(output_path, helper_name))
         except Exception as e:
             print(e)
 
