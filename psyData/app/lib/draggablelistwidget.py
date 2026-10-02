@@ -3,6 +3,7 @@ from PyQt5.QtWidgets import (
     QWidget, QAbstractItemView,
 )
 from PyQt5.QtCore import pyqtSignal, Qt, QTimer
+from PyQt5 import sip
 
 from app.lib import MessageBox
 from app.lib.list_widget import ListWidget
@@ -71,6 +72,8 @@ class DraggableListWidget(ListWidget):
             self.itemDoubleClicked.connect(self.itemDoubleClick)
 
     def removeItem(self, item):
+        if item is self.itemLabel:
+            self._clear_operation_selector()
         self.contentList.remove(item.text())
         super().removeItem(item)
 
@@ -203,9 +206,12 @@ class DraggableListWidget(ListWidget):
 
     def _show_operation_selector(self, item):
         """Replace one Data item temporarily with its analysis-operation combo box."""
-        if self.itemLabel is item and self.combo_box is not None:
+        if (self.itemLabel is item and self.combo_box is not None
+                and not sip.isdeleted(self.combo_box)):
             if not self.combo_box.view().isVisible():
-                QTimer.singleShot(0, self.combo_box.showPopup)
+                combo_box = self.combo_box
+                QTimer.singleShot(
+                    0, lambda: self._show_operation_popup(combo_box))
             return
         try:
             current_text = item.text().split('@', 1)[1]
@@ -228,16 +234,34 @@ class DraggableListWidget(ListWidget):
         self.combo_box.setMaximumWidth(int(item_widget.sizeHint().width() * 0.88))
         self.combo_box.activated[str].connect(self.confirmBox)
         self.combo_box.setFocus(Qt.MouseFocusReason)
-        QTimer.singleShot(0, self.combo_box.showPopup)
+        combo_box = self.combo_box
+        QTimer.singleShot(0, lambda: self._show_operation_popup(combo_box))
+
+    def _show_operation_popup(self, combo_box):
+        """Open a queued selector popup only while its Qt object remains current."""
+        if (self.combo_box is not combo_box or combo_box is None
+                or sip.isdeleted(combo_box)):
+            return
+        try:
+            combo_box.showPopup()
+        except RuntimeError:
+            if self.combo_box is combo_box:
+                self.combo_box = None
+                self.itemLabel = None
 
     def _clear_operation_selector(self):
         """Remove the temporary analysis-operation combo box, if one is active."""
-        if self.itemLabel is not None and self.row(self.itemLabel) >= 0:
-            self.setItemWidget(self.itemLabel, None)
-        if self.combo_box is not None:
-            self.combo_box.deleteLater()
+        item = self.itemLabel
+        combo_box = self.combo_box
         self.itemLabel = None
         self.combo_box = None
+        if item is not None and self.row(item) >= 0:
+            item_widget = self.itemWidget(item)
+            self.setItemWidget(item, None)
+            if item_widget is not None and not sip.isdeleted(item_widget):
+                item_widget.deleteLater()
+        elif combo_box is not None and not sip.isdeleted(combo_box):
+            combo_box.deleteLater()
 
     def ShowContextMenu(self, pos):
         """Show Data-item analysis actions in addition to the standard delete actions."""

@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout, QPushButton, QDialog, QTextEdit, QFrame
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
-from app.func import Func
+from app.psyDataFunc import PsyDataFunc as Func
 
 
 def outlier_mode_lnlike(params, cdf_values):
@@ -60,7 +60,7 @@ class CdfPoolingWidget(QDialog):
         self.omega_hat = omega_hat
         self.original_omega = omega_hat
         self.setWindowTitle('CDF Pooling Model Fit')
-        self.setWindowIcon(Func.getImageObject("common/icon.png", type=1))
+        self.setWindowIcon(Func.getImageObject("icon.png", type=1))
         self.setWindowModality(Qt.ApplicationModal)
 
         self.canvas = MplCanvas(cdf_data, po_hat, omega_hat)

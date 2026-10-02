@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtWidgets import QMessageBox, QDialog, QVBoxLayout
-from app.func import Func
+from app.psyDataFunc import PsyDataFunc as Func
 from app.lib import MessageBox
 from app.psyDataFunc import PsyDataFunc
 from app.rtDist import CDF_pooling_main
@@ -296,7 +296,8 @@ class StatisticTool:
     # 转换规则
 
     @staticmethod
-    def filterData(row_var_list, column_var_list, dataFrame, ruleList):
+    def filterData(row_var_list, column_var_list, dataFrame, ruleList,
+                   record_script=True):
         StatisticTool.checkEmptyNullValue(dataFrame, row_var_list, column_var_list)
 
         tmp_data_frame = dataFrame.copy()
@@ -378,7 +379,9 @@ class StatisticTool:
                 filtered_df = tmp_data_frame[tmp_data_frame[variable_name].isin(data)]
                 tmp_data_frame = filtered_df
 
-        PsyDataFunc.genScript(f'cdfPoolingOmegas = [{be_printed_omega_str[:-2]}]')
+        if record_script:
+            PsyDataFunc.genScript(
+                f'cdfPoolingOmegas = [{be_printed_omega_str[:-2]}]')
 
         return tmp_data_frame
 
@@ -395,7 +398,7 @@ class FlashMessageBox(MessageBox):
         self.setWindowTitle(self.title)
         self.setStandardButtons(QMessageBox.Ok)
         self.setDefaultButton(QMessageBox.Ok)
-        # self.setWindowIcon(Func.getImageObject("common/icon.png", type=1))
+        # self.setWindowIcon(Func.getImageObject("icon.png", type=1))
         # self.setWindowFlag(Qt.WindowStaysOnTopHint)
         self.setText(self.textStr)
 

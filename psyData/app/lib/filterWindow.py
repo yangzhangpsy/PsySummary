@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import QWidget, QCheckBox, QListWidgetItem, QMessageBox, QL
     QFrame, QTextEdit, QPushButton, QGridLayout, QGroupBox, QVBoxLayout, QHBoxLayout, \
     QApplication, QListView, QStyledItemDelegate, QStyleOptionButton, QStyle, QSizePolicy, QLineEdit
 
-from app.func import Func
+from app.psyDataFunc import PsyDataFunc as Func
 from app.lib.draggablelistwidget import FilterDragListWidget
 
 
@@ -140,7 +140,7 @@ class FilterWindow(QWidget):
         self.isValue2Disabled = False
         self.isValue1Disabled = False
 
-        self.setWindowIcon(Func.getImageObject("common/icon.png", type=1))
+        self.setWindowIcon(Func.getImageObject("icon.png", type=1))
         self.setWindowTitle("Define Filter")
         self.var_name_label = QLabel("Variable Names:")
         self.current_filters_label = QLabel("Current Filters:")
@@ -270,8 +270,8 @@ in the view/analysis/summary procedure.""")
         self.range_page_info.setHtml("""
                                     Select a range of values to include in the filter. Only values within the defined range can
                                     be included in the view/analysis/summary procedure.<br>
-                                    <br>The <b>Shifting Z</b> method will use
-                                    the non-recursive Shifting Z criterion (<i>Van Selst & Jolicoeur, 1994, QJEP</i>) to remove outliers.<br>
+                                    <br><b>Shifting Z:</b> Automatically adjusts the SD cutoff around the mean to each group’s sample size,
+                                    without iterative recalculation. Van Selst &amp; Jolicoeur (1994).<br>
                                     <br>The <b>MAD</b> (Median Absolute Deviation, <i>Leys et. al., 2013, JESP</i>) method
                                     will use the <i>n</i>*MAD (MAD = 1.4826*median(|X - median(X)|)), criterion to remove outliers.
                                     """)

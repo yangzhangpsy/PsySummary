@@ -6,6 +6,7 @@ from app.rtDist import gamma_estimate_x, shifted_gamma_estimate_x, ex_wald_estim
     wald_estimate_x, log_normal_estimate_x, shifted_log_normal_estimate_x, weibull_estimate_x, \
     shifted_weibull_estimate_x, ex_gaussian_estimate_x, inverse_gaussian_estimate_x, \
     shifted_inverse_gaussian_estimate_x, shift_wald_estimate_x, FIT_DIAGNOSTIC_NAMES, fit_rt_distribution
+from app.fitCancellation import FitCancelled, raise_if_fit_cancelled
 
 
 class FitRTsDistThread(QThread):
@@ -13,6 +14,7 @@ class FitRTsDistThread(QThread):
     # infoType, infoString, showTimeInfo or not
     fitStatus = pyqtSignal(int, str, bool)
     finished = pyqtSignal(object, list, list, list, object)
+    cancelled = pyqtSignal()
 
     # Mapping of distribution names to their configurations
     # Structure: {Display Name: (Internal Name, Parameter Names, Estimation Function)}
@@ -62,6 +64,8 @@ class FitRTsDistThread(QThread):
             # Process the distribution fitting
             self._process_distribution()
 
+        except FitCancelled:
+            self.cancelled.emit()
         except Exception as e:
             # Emit error status if fitting fails
             self.fitStatus.emit(2, f'Fitting error: {str(e)}', True)
@@ -81,6 +85,9 @@ class FitRTsDistThread(QThread):
         4. Generate parameter names
         5. Emit results
         """
+        cancel_check = self.isInterruptionRequested
+        raise_if_fit_cancelled(cancel_check)
+
         # Emit start status
         # self.fitStatus.emit(0, f'Start to fit the distribution via {self.distribution}...', False)
 
@@ -94,12 +101,9 @@ class FitRTsDistThread(QThread):
         # Unpack distribution details
         parameter_names, _estimate_func = self.DISTRIBUTION_MAP[dist_key]
 
-        # Special handling for Ex-Wald (known to be slow)
+        # Special handling for Wald-family models (reference note only; the queue logs progress).
         if 'Wald' in dist_key:
-            self.fitStatus.emit(0, f"Start to fit the data dist via {dist_key}...", False)
             self.fitStatus.emit(0, f'See detailed info in Heathcote, (2004), <i>Behavior Research Methods, Instruments & Computers</i>, 36(4): 678-694 ...', False)
-        else:
-            self.fitStatus.emit(0, f"Start to fit the data dist via {dist_key}...", False)
 
         prepared_frame = self._prepare_fit_dataframe()
 
@@ -110,7 +114,10 @@ class FitRTsDistThread(QThread):
         fit_records = []
 
         def fit_group(series):
-            fit = fit_rt_distribution(series, dist_key)
+            raise_if_fit_cancelled(cancel_check)
+            fit = fit_rt_distribution(
+                series, dist_key, cancel_check=cancel_check)
+            raise_if_fit_cancelled(cancel_check)
             group_value = series.name
             if not isinstance(group_value, tuple):
                 group_value = (group_value,)
@@ -154,6 +161,7 @@ class FitRTsDistThread(QThread):
         full_parameter_names = [f"{self.independentVarName}@{self.operation} {item}" for item in output_names]
 
         # Emit final results
+        raise_if_fit_cancelled(cancel_check)
         self.finished.emit(grouped_result, full_parameter_names, self.row_vars, self.col_vars, fit_records)
 
     def _prepare_fit_dataframe(self):

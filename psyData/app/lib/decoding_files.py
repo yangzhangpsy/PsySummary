@@ -6,7 +6,7 @@ from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal, pyqtSlot
 from PyQt5.QtWidgets import QTableWidgetItem, QMessageBox, QComboBox, QTableWidget, QPushButton, QGridLayout, \
     QLabel, QHBoxLayout, QVBoxLayout, QCheckBox
 
-from app.func import Func
+from app.psyDataFunc import PsyDataFunc as Func
 from app.lib import MessageBox, Dialog, VarComboBox
 from app.lib.source_file import addSourceFileColumn
 
@@ -100,7 +100,7 @@ class DecodingFiles(Dialog):
 
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)  # 去除问号按钮
         self.setWindowModality(Qt.WindowModal)
-        # self.setWindowIcon(Func.getImageObject("common/icon.png", type=1))
+        # self.setWindowIcon(Func.getImageObject("icon.png", type=1))
 
         self.default_properties = {
             "text format": "utf-8",

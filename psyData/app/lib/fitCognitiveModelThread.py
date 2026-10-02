@@ -5,7 +5,11 @@ import pandas as pd
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from app.cognitiveModels import fit_cognitive_model
-from app.cognitiveModelSpec import cognitive_model_reference_text
+from app.fitCancellation import FitCancelled, raise_if_fit_cancelled
+from app.cognitiveModelSpec import (
+    ACCURACY_CODING, BOUNDARY_CODING_LABELS, RATCLIFF_MODEL, RESPONSE_CODING,
+    cognitive_model_reference_text, validate_model_data, model_result_parameters,
+)
 
 
 COGNITIVE_DIAGNOSTIC_NAMES = [
@@ -18,6 +22,7 @@ class FitCognitiveModelThread(QThread):
 
     fitStatus = pyqtSignal(int, str, bool)
     finished = pyqtSignal(object, list, list, list, object)
+    cancelled = pyqtSignal()
 
     def __init__(self, dataframe, specification, row_vars, col_vars, parent=None):
         """Initialize the grouped cognitive-model worker."""
@@ -31,16 +36,32 @@ class FitCognitiveModelThread(QThread):
         """Fit all groups and emit result arrays plus diagnostics records."""
         try:
             self._process_model()
+        except FitCancelled:
+            self.cancelled.emit()
         except Exception as error:
             self.fitStatus.emit(2, f'Cognitive model fitting error: {error}', True)
             self.finished.emit(None, [], self.row_vars, self.col_vars, [])
 
     def _process_model(self):
         """Prepare groups, fit each one, and emit table-ready results."""
+        cancel_check = self.isInterruptionRequested
+        raise_if_fit_cancelled(cancel_check)
         specification = self.specification
         model = specification['model']
         self.fitStatus.emit(0, cognitive_model_reference_text(model), False)
+        if model == RATCLIFF_MODEL:
+            coding = specification.get('boundary_coding', RESPONSE_CODING)
+            mapping = specification.get('response_mapping', {})
+            details = (
+                'Accuracy boundaries are fitted; z and d are mirrored when the correct physical '
+                'response is lower.' if coding == ACCURACY_CODING else
+                'Mapped response boundaries are fitted; v is reversed when the correct physical '
+                'response is lower.')
+            self.fitStatus.emit(
+                0, f'Coding scheme: {BOUNDARY_CODING_LABELS.get(coding, coding)}; '
+                   f'response mapping={mapping}. {details}', False)
         group_vars = self.row_vars + self.col_vars
+        validate_model_data(specification, self.dataframe, group_vars)
         required = list(dict.fromkeys(
             group_vars + [specification['rt_variable'], specification['response_variable']]
             + ([specification['accuracy_variable']] if specification.get('accuracy_variable') else [])))
@@ -51,7 +72,11 @@ class FitCognitiveModelThread(QThread):
         fit_records = []
 
         def fit_group(group_frame, group_values=()):
-            fit = fit_cognitive_model(group_frame, specification)
+            raise_if_fit_cancelled(cancel_check)
+            fit = fit_cognitive_model(
+                group_frame, specification, validate=False,
+                cancel_check=cancel_check)
+            raise_if_fit_cancelled(cancel_check)
             fit['group_vars'] = list(group_vars)
             fit['group_values'] = group_values
             fit['result_prefix'] = f"{specification['rt_variable']}@{model}"
@@ -92,11 +117,12 @@ class FitCognitiveModelThread(QThread):
 
         parameter_labels = [
             f"{parameter['name']} ({parameter['mode'].capitalize()})"
-            for parameter in specification['parameters']
+            for parameter in model_result_parameters(specification)
         ]
         prefix = f"{specification['rt_variable']}@{model}"
         diagnostic_names = list(COGNITIVE_DIAGNOSTIC_NAMES)
         if specification.get('accuracy_variable'):
             diagnostic_names.insert(3, 'Accuracy rate')
         output_names = [f'{prefix} {name}' for name in parameter_labels + diagnostic_names]
+        raise_if_fit_cancelled(cancel_check)
         self.finished.emit(grouped_result, output_names, self.row_vars, self.col_vars, fit_records)

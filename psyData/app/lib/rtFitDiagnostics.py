@@ -5,15 +5,18 @@ from scipy.integrate import cumulative_trapezoid
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.colors import hsv_to_rgb, to_hex
 from matplotlib.figure import Figure
-from PyQt5.QtCore import QEvent, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QRect, QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QStandardItem, QStandardItemModel
 from PyQt5.QtWidgets import (
-    QButtonGroup, QComboBox, QDialog, QHBoxLayout, QLabel, QRadioButton, QVBoxLayout,
+    QApplication, QButtonGroup, QComboBox, QDialog, QHBoxLayout, QLabel,
+    QRadioButton, QVBoxLayout,
 )
 
 from app.rtDist import rt_distribution_cdf, rt_distribution_pdf
-from app.cognitiveModelSpec import COGNITIVE_MODEL_NAMES, RATCLIFF_MODEL
-from app.cognitiveModels import cognitive_model_pdf
+from app.cognitiveModelSpec import (
+    ACCURACY_CODING, COGNITIVE_MODEL_NAMES, RATCLIFF_MODEL, RESPONSE_CODING,
+)
+from app.cognitiveModels import fitted_accuracy_pdf, fitted_response_pdf
 
 
 class CheckableComboBox(QComboBox):
@@ -137,16 +140,23 @@ class RTFitDiagnosticsDialog(QDialog):
 
         layout = QVBoxLayout(self)
         mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel('Display:'))
+        mode_row.addWidget(QLabel('Display By:'))
         self.response_mode_button = QRadioButton('Response')
         self.accuracy_mode_button = QRadioButton('Correct / Error')
         self.display_mode_group = QButtonGroup(self)
         self.display_mode_group.setExclusive(True)
         for button in (self.response_mode_button, self.accuracy_mode_button):
             self.display_mode_group.addButton(button)
-        self.response_mode_button.setChecked(True)
+        initial_record = fit_records[initial_index] if fit_records else {}
+        initial_coding = initial_record.get(
+            'boundary_coding',
+            initial_record.get('specification', {}).get('boundary_coding', RESPONSE_CODING))
+        if initial_coding == ACCURACY_CODING:
+            self.accuracy_mode_button.setChecked(True)
+        else:
+            self.response_mode_button.setChecked(True)
         self.accuracy_mode_button.setToolTip(
-            'Requires an Accuracy/Correct Variable in the cognitive-model settings.')
+            'Requires an Accuracy Variable in the cognitive-model settings.')
         mode_row.addWidget(self.response_mode_button)
         mode_row.addWidget(self.accuracy_mode_button)
         mode_row.addStretch(1)
@@ -167,6 +177,61 @@ class RTFitDiagnosticsDialog(QDialog):
         self.display_mode_group.buttonClicked.connect(self._draw_selected_records)
         self._update_accuracy_mode_availability()
         self._draw_selected_records()
+        self._position_within_available_screen()
+
+    @staticmethod
+    def _bounded_geometry(size, center, available):
+        """Return a centered window rectangle constrained to one available screen."""
+        width = min(max(1, size.width()), max(1, available.width()))
+        height = min(max(1, size.height()), max(1, available.height()))
+        maximum_x = available.right() - width + 1
+        maximum_y = available.bottom() - height + 1
+        x = min(max(center.x() - width // 2, available.left()), maximum_x)
+        y = min(max(center.y() - height // 2, available.top()), maximum_y)
+        return QRect(x, y, width, height)
+
+    def _position_within_available_screen(self):
+        """Center on the parent window's screen without crossing its usable bounds."""
+        parent = self.parentWidget()
+        anchor_window = parent.window() if parent is not None else None
+        primary_screen = QApplication.primaryScreen()
+        if anchor_window is not None:
+            center = anchor_window.frameGeometry().center()
+        else:
+            if primary_screen is None:
+                return
+            center = primary_screen.availableGeometry().center()
+
+        screen = QApplication.screenAt(center) or primary_screen
+        if screen is None:
+            return
+        self.winId()
+        client_geometry = self.geometry()
+        frame_geometry = self.frameGeometry()
+        left_margin = max(0, client_geometry.left() - frame_geometry.left())
+        top_margin = max(0, client_geometry.top() - frame_geometry.top())
+        right_margin = max(0, frame_geometry.right() - client_geometry.right())
+        bottom_margin = max(0, frame_geometry.bottom() - client_geometry.bottom())
+        available = screen.availableGeometry()
+        client_width = min(
+            self.width(), max(1, available.width() - left_margin - right_margin))
+        client_height = min(
+            self.height(), max(1, available.height() - top_margin - bottom_margin))
+        frame_size = QSize(
+            client_width + left_margin + right_margin,
+            client_height + top_margin + bottom_margin)
+        frame_target = self._bounded_geometry(frame_size, center, available)
+        self.setGeometry(
+            frame_target.left() + left_margin,
+            frame_target.top() + top_margin,
+            client_width,
+            client_height,
+        )
+
+    def showEvent(self, event):
+        """Revalidate placement in case monitor geometry changed after construction."""
+        self._position_within_available_screen()
+        super().showEvent(event)
 
     def _selection_changed(self):
         """Update display-mode availability and redraw after group selection changes."""
@@ -179,7 +244,7 @@ class RTFitDiagnosticsDialog(QDialog):
             self.fit_records[index] for index in self.group_selector.checked_indices()
         ]
         supported = bool(selected_records) and all(
-            record.get('model') in COGNITIVE_MODEL_NAMES
+            record.get('model') == RATCLIFF_MODEL
             and bool(record.get('specification', {}).get('accuracy_variable'))
             and record.get('accuracy') is not None
             for record in selected_records
@@ -298,13 +363,13 @@ class RTFitDiagnosticsDialog(QDialog):
         accuracy_mode = self.accuracy_mode_button.isChecked()
         density_axis.set_ylabel('Density')
         density_axis.set_title(
-            'Observed correct/error RT distributions and fitted densities'
+            'Observed correct/error RT distributions and model-implied densities'
             if accuracy_mode else 'Observed RT distributions and fitted densities')
         density_axis.legend(loc='best')
         cdf_axis.set_xlabel('Reaction time')
         cdf_axis.set_ylabel('Cumulative probability')
         cdf_axis.set_title(
-            'Correct/error empirical CDFs (dashed) and fitted CDFs (solid)'
+            'Correct/error empirical CDFs (dashed) and model-implied CDFs (solid)'
             if accuracy_mode else 'Empirical CDFs (dashed) and fitted CDFs (solid)')
         cdf_axis.set_ylim(-0.02, 1.02)
         cdf_axis.legend(loc='best')
@@ -339,6 +404,7 @@ class RTFitDiagnosticsDialog(QDialog):
         status = 'Converged' if record['converged'] else 'Not converged'
         status_line = (
             f'<b>{html.escape(label)}</b>: {status}; N={record["n_valid"]}; '
+            f'coding={html.escape(record.get("boundary_coding", RESPONSE_CODING))}; '
             f'responses={html.escape(str(record["response_counts"]))}; '
             f'LL={self._number(record["log_likelihood"])}; '
             f'AIC={self._number(record["aic"])}; BIC={self._number(record["bic"])}.'
@@ -380,9 +446,7 @@ class RTFitDiagnosticsDialog(QDialog):
                 response_data, empirical, where='post', color=color, linestyle='--',
                 linewidth=1.4, label=f'{response_label} — empirical')
             try:
-                fitted_density = cognitive_model_pdf(
-                    record['model'], x_values, response_index,
-                    record['parameter_names'], record['parameters'], len(response_values))
+                fitted_density = fitted_response_pdf(record, x_values, response_index)
                 density_axis.plot(
                     x_values, fitted_density, color=color, linewidth=2,
                     label=f'{response_label} — fitted')
@@ -399,7 +463,7 @@ class RTFitDiagnosticsDialog(QDialog):
         """Draw observed and model-implied correct/error RT distributions."""
         accuracy = record.get('accuracy')
         if accuracy is None:
-            return status_line + ' Correct/Error diagnostics require an Accuracy/Correct Variable.'
+            return status_line + ' Correct/Error diagnostics require an Accuracy Variable.'
         data = np.asarray(record['rt'], dtype=float)
         responses = np.asarray(record['response'], dtype=int)
         accuracy = np.asarray(accuracy, dtype=float)
@@ -427,31 +491,40 @@ class RTFitDiagnosticsDialog(QDialog):
                 linewidth=1.4, label=f'{response_label} — empirical')
 
         response_count = len(record['specification']['response_values'])
-        correct_weights, warning = self._correct_response_weights(
-            responses[valid], accuracy[valid], response_count)
+        correct_weights = record.get('correct_response_weights')
+        warning = ''
+        if correct_weights is None:
+            correct_weights, warning = self._correct_response_weights(
+                responses[valid], accuracy[valid], response_count)
+        else:
+            correct_weights = np.asarray(correct_weights, dtype=float)
         if correct_weights is None:
             return status_line + f' {warning}'
+        observed_accuracy = float(np.mean(accuracy[valid]))
+        weight_labels = (
+            ['lower', 'upper'] if record['model'] == RATCLIFF_MODEL
+            else [f'Accumulator {index}' for index in range(1, response_count + 1)])
+        weights_text = ' / '.join(
+            f'{name}: {weight:.2%}' for name, weight in zip(weight_labels, correct_weights))
+        status_line += (
+            f'<br>Observed correct/error: {observed_accuracy:.2%} / {1.0 - observed_accuracy:.2%}. '
+            f'Correct-response weights ({weights_text}) reflect which response should be correct. '
+            'Both displays use the same shared parameter set; switching display does not refit the model.')
         spread = max(float(np.ptp(data[valid])), abs(float(np.mean(data[valid]))) * 0.05, 1e-6)
         x_values = np.linspace(0.0, float(np.max(data[valid])) + 0.10 * spread, 400)
         try:
-            response_densities = np.asarray([
-                cognitive_model_pdf(
-                    record['model'], x_values, response_index,
-                    record['parameter_names'], record['parameters'], response_count)
-                for response_index in range(1, response_count + 1)
-            ])
-            correct_density = np.sum(correct_weights[:, None] * response_densities, axis=0)
-            error_density = np.sum((1.0 - correct_weights)[:, None] * response_densities, axis=0)
+            correct_density = fitted_accuracy_pdf(record, x_values, correct=True)
+            error_density = fitted_accuracy_pdf(record, x_values, correct=False)
             for density, category_label, color in zip(
                     (correct_density, error_density), ('Correct', 'Error'), category_colors):
                 response_label = f'{curve_label} / {category_label}'
                 density_axis.plot(
                     x_values, density, color=color, linewidth=2,
-                    label=f'{response_label} — fitted')
+                    label=f'{response_label} — model-implied')
                 fitted_cdf = cumulative_trapezoid(density, x_values, initial=0.0)
                 cdf_axis.plot(
                     x_values, fitted_cdf, color=color, linewidth=2,
-                    label=f'{response_label} — fitted')
+                    label=f'{response_label} — model-implied')
         except Exception as error:
             status_line += f' Curve unavailable: {html.escape(str(error))}.'
         return status_line

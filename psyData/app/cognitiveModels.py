@@ -10,12 +10,22 @@ from scipy.optimize import OptimizeResult, brentq, minimize
 from scipy.special import ndtr
 
 try:
+    from app.fitCancellation import raise_if_fit_cancelled
+except ImportError:  # Standalone PsySummary analysis-script export.
+    def raise_if_fit_cancelled(cancel_check):
+        """Honor an optional callback without requiring the GUI cancellation module."""
+        if cancel_check is not None and cancel_check():
+            raise RuntimeError('Model fitting was cancelled by the caller.')
+
+try:
     from app.cognitiveModelSpec import (
-        LBA_MODEL, RATCLIFF_MODEL, RDM_MODEL, validate_model_specification,
+        ACCURACY_CODING, LBA_MODEL, RATCLIFF_MODEL, RESPONSE_CODING, RDM_MODEL,
+        validate_model_data,
     )
 except ImportError:  # Standalone PsySummary analysis-script export.
     from cognitiveModelSpec import (
-        LBA_MODEL, RATCLIFF_MODEL, RDM_MODEL, validate_model_specification,
+        ACCURACY_CODING, LBA_MODEL, RATCLIFF_MODEL, RESPONSE_CODING, RDM_MODEL,
+        validate_model_data,
     )
 
 
@@ -467,9 +477,54 @@ def _constraint_margins(model, values):
     return np.asarray(margins)
 
 
-def fit_cognitive_model(dataframe, specification):
-    """Fit one configured cognitive RT model to a filtered data frame."""
-    validate_model_specification(specification, dataframe.columns)
+def fit_cognitive_model(dataframe, specification, validate=True, cancel_check=None):
+    """Fit one shared model using the configured coding, optionally after dataset validation."""
+    raise_if_fit_cancelled(cancel_check)
+    if validate:
+        validate_model_data(specification, dataframe)
+    return _fit_response_model(dataframe, specification, cancel_check)
+
+
+def _correct_response_indices(response_indices, accuracy_values):
+    """Infer the correct physical boundary for every retained binary trial."""
+    return np.where(np.asarray(accuracy_values) == 1, response_indices, 3 - response_indices).astype(int)
+
+
+def _oriented_diffusion_arguments(arguments, correct_response, boundary_coding):
+    """Return DDM arguments expressed in the requested trial's boundary coordinates."""
+    oriented = dict(arguments)
+    if boundary_coding == RESPONSE_CODING:
+        if int(correct_response) == 1:
+            oriented['v'] = -oriented['v']
+    elif boundary_coding == ACCURACY_CODING:
+        if int(correct_response) == 1:
+            oriented['z'] = oriented['a'] - oriented['z']
+            oriented['d'] = -oriented['d']
+    else:
+        raise ValueError(f'Unsupported Ratcliff boundary coding: {boundary_coding}.')
+    return oriented
+
+
+def _oriented_diffusion_pdf(rt_values, model_responses, correct_responses, arguments,
+                            boundary_coding):
+    """Evaluate trial densities while orienting asymmetric DDM parameters by correct response."""
+    rt_values = np.asarray(rt_values, dtype=float)
+    model_responses = np.asarray(model_responses, dtype=object)
+    correct_responses = np.asarray(correct_responses, dtype=int)
+    densities = np.zeros(rt_values.shape, dtype=float)
+    for correct_response in (1, 2):
+        mask = correct_responses == correct_response
+        if np.any(mask):
+            densities[mask] = diffusion_pdf(
+                rt_values[mask], model_responses[mask],
+                **_oriented_diffusion_arguments(
+                    arguments, correct_response, boundary_coding))
+    return densities
+
+
+def _fit_response_model(dataframe, specification, cancel_check=None):
+    """Fit one model jointly to all valid RT and observed-response pairs."""
+    raise_if_fit_cancelled(cancel_check)
     model = specification['model']
     rt_values = pd.to_numeric(dataframe[specification['rt_variable']], errors='coerce')
     responses = dataframe[specification['response_variable']]
@@ -489,8 +544,8 @@ def fit_cognitive_model(dataframe, specification):
     expected_levels = ({'lower', 'upper'} if model == RATCLIFF_MODEL
                        else set(range(1, len(response_values) + 1)))
     observed_levels = set(mapped_responses.tolist())
-    if observed_levels != expected_levels:
-        raise ValueError('Every configured response value must occur in each fitted group.')
+    if not observed_levels or not observed_levels.issubset(expected_levels):
+        raise ValueError('The fitted group contains no valid configured response values.')
     if model == RATCLIFF_MODEL:
         model_responses = mapped_responses.astype(object)
         response_indices = np.where(model_responses == 'lower', 1, 2)
@@ -502,10 +557,19 @@ def fit_cognitive_model(dataframe, specification):
     if specification.get('accuracy_variable'):
         accuracy_values = pd.to_numeric(
             dataframe.loc[valid, specification['accuracy_variable']], errors='coerce').to_numpy()[valid_response]
-        finite_accuracy = accuracy_values[np.isfinite(accuracy_values)]
-        if finite_accuracy.size == 0 or not set(np.unique(finite_accuracy)).issubset({0.0, 1.0}):
-            raise ValueError('Accuracy/Correct Variable must contain Boolean or numeric 0/1 values.')
-        accuracy_rate = float(np.mean(finite_accuracy))
+        if (accuracy_values.size == 0 or not np.isfinite(accuracy_values).all()
+                or not np.isin(accuracy_values, (0.0, 1.0)).all()):
+            raise ValueError(
+                'Accuracy Variable must contain only 0 (error) and 1 (correct), with no '
+                'missing values. Recode or exclude invalid rows in Filter Data.')
+        accuracy_rate = float(np.mean(accuracy_values))
+
+    boundary_coding = specification.get('boundary_coding', RESPONSE_CODING)
+    correct_responses = None
+    if model == RATCLIFF_MODEL:
+        correct_responses = _correct_response_indices(response_indices, accuracy_values)
+        if boundary_coding == ACCURACY_CODING:
+            model_responses = np.where(accuracy_values == 1, 'upper', 'lower').astype(object)
 
     free_parameters = [parameter for parameter in specification['parameters'] if parameter['mode'] == 'free']
     initial = np.asarray([float(parameter['value']) for parameter in free_parameters])
@@ -513,11 +577,16 @@ def fit_cognitive_model(dataframe, specification):
     pdf_function = diffusion_pdf if model == RATCLIFF_MODEL else lba_pdf if model == LBA_MODEL else rdm_pdf
 
     def objective(free_values):
+        raise_if_fit_cancelled(cancel_check)
         values = _parameter_values(specification, free_values)
         if not _valid_parameter_combination(model, values):
             return 1e100
         arguments = _model_arguments(model, values, len(response_values))
-        densities = np.asarray(pdf_function(rt_values, model_responses, **arguments), dtype=float)
+        if model == RATCLIFF_MODEL:
+            densities = _oriented_diffusion_pdf(
+                rt_values, model_responses, correct_responses, arguments, boundary_coding)
+        else:
+            densities = np.asarray(pdf_function(rt_values, model_responses, **arguments), dtype=float)
         if np.any(~np.isfinite(densities)) or np.any(densities <= _TINY):
             return 1e100
         return float(-np.sum(np.log(densities)))
@@ -530,6 +599,7 @@ def fit_cognitive_model(dataframe, specification):
     rng = np.random.default_rng(random_seed)
     candidates = [initial]
     for _index in range(starts - 1):
+        raise_if_fit_cancelled(cancel_check)
         candidate = None
         for _attempt in range(1000):
             sampled = np.asarray([rng.uniform(lower, upper) for lower, upper in bounds])
@@ -550,6 +620,7 @@ def fit_cognitive_model(dataframe, specification):
                 'ftol': 1e-9,
             })
                    for candidate in candidates]
+        raise_if_fit_cancelled(cancel_check)
         result = min(results, key=lambda candidate: candidate.fun if np.isfinite(candidate.fun) else np.inf)
     else:
         fixed_objective = objective(np.asarray([], dtype=float))
@@ -562,6 +633,20 @@ def fit_cognitive_model(dataframe, specification):
     parameter_values = [final_values[name] for name in parameter_names]
     free_count = len(free_parameters)
     log_likelihood = -float(result.fun)
+    fit_warnings = []
+    if observed_levels != expected_levels:
+        fit_warnings.append(
+            'Only one response boundary was observed in this group; response bias and drift '
+            'parameters may be weakly identified.')
+    if accuracy_values is not None and np.unique(accuracy_values).size == 1:
+        category = 'correct' if accuracy_values[0] == 1 else 'error'
+        missing = 'error' if category == 'correct' else 'correct'
+        fit_warnings.append(
+            f'This group contains only {category} trials and no {missing} trials; parameter '
+            'recovery and fit diagnostics may be unreliable.')
+    message = str(result.message)
+    if fit_warnings:
+        message += ' Warning: ' + ' '.join(fit_warnings)
     return {
         'model': model,
         'parameter_names': parameter_names,
@@ -574,8 +659,15 @@ def fit_cognitive_model(dataframe, specification):
         },
         'accuracy': accuracy_values,
         'accuracy_rate': accuracy_rate,
+        'boundary_coding': boundary_coding,
+        'correct_response': correct_responses,
+        'correct_response_weights': (
+            np.bincount(correct_responses, minlength=3)[1:].astype(float) / correct_responses.size
+            if correct_responses is not None else None),
+        'fit_semantics': boundary_coding,
         'converged': bool(result.success and np.isfinite(result.fun) and result.fun < 1e99),
-        'message': str(result.message),
+        'message': message,
+        'fit_warnings': fit_warnings,
         'optimizer_method': 'SLSQP',
         'random_seed': random_seed,
         'log_likelihood': log_likelihood,
@@ -599,3 +691,54 @@ def cognitive_model_pdf(model, rt, response, parameter_names, parameter_values, 
     if model == RDM_MODEL:
         return rdm_pdf(rt, int(response), **arguments)
     raise ValueError(f'Unsupported cognitive RT model: {model}.')
+
+
+def fitted_response_pdf(record, rt, response):
+    """Predict one physical response, marginalizing over correct-response directions."""
+    if record['model'] == RATCLIFF_MODEL:
+        values = dict(zip(record['parameter_names'], np.asarray(record['parameters'], dtype=float)))
+        arguments = _model_arguments(RATCLIFF_MODEL, values, 2)
+        weights = _record_correct_response_weights(record)
+        boundary = 'lower' if int(response) == 1 else 'upper'
+        return sum(
+            weights[correct_response - 1] * diffusion_pdf(
+                rt, boundary,
+                **_oriented_diffusion_arguments(
+                    arguments, correct_response, RESPONSE_CODING))
+            for correct_response in (1, 2)
+        )
+    return cognitive_model_pdf(record['model'], rt, response, record['parameter_names'],
+                               record['parameters'], len(record['specification']['response_values']))
+
+
+def fitted_accuracy_pdf(record, rt, correct=True):
+    """Predict correct or error RTs by marginalizing over physical correct-response directions."""
+    if record['model'] != RATCLIFF_MODEL:
+        raise ValueError('Correct/Error model curves are currently available for Ratcliff fits only.')
+    values = dict(zip(record['parameter_names'], np.asarray(record['parameters'], dtype=float)))
+    arguments = _model_arguments(RATCLIFF_MODEL, values, 2)
+    weights = _record_correct_response_weights(record)
+    boundary = 'upper' if correct else 'lower'
+    return sum(
+        weights[correct_response - 1] * diffusion_pdf(
+            rt, boundary,
+            **_oriented_diffusion_arguments(
+                arguments, correct_response, ACCURACY_CODING))
+        for correct_response in (1, 2)
+    )
+
+
+def _record_correct_response_weights(record):
+    """Return saved or inferable physical correct-response proportions for one fit record."""
+    saved = record.get('correct_response_weights')
+    if saved is not None:
+        weights = np.asarray(saved, dtype=float)
+    else:
+        responses = np.asarray(record.get('response'), dtype=int)
+        accuracy = np.asarray(record.get('accuracy'), dtype=float)
+        correct_responses = _correct_response_indices(responses, accuracy)
+        weights = np.bincount(correct_responses, minlength=3)[1:].astype(float)
+        weights /= np.sum(weights)
+    if weights.shape != (2,) or not np.isfinite(weights).all() or np.sum(weights) <= 0:
+        raise ValueError('Correct-response weights are unavailable for this Ratcliff fit.')
+    return weights

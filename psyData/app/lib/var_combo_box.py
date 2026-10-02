@@ -46,24 +46,30 @@ class VarComboBox(QComboBox):
             self.addItem(text)
         self.setCurrentText(text)
 
-    # def setCurrentText(self, text: str) -> None:
-    #     index = self.findText(text, Qt.MatchExactly)
-    #     if index == -1:
-    #         self.addItem(text)
-
-    def addCurrentText(self, text: str):
+    def setCurrentText(self, text: str) -> None:
+        """Select a value and retain it as the fallback when it is valid."""
         index = self.findText(text, Qt.MatchExactly)
         if index == -1:
             self.addItem(text)
+        QComboBox.setCurrentText(self, text)
+        current_text = self.currentText()
+        if self.reg_exp == "" or re.fullmatch(self.reg_exp, current_text) is not None:
+            self.valid_data = current_text
+
+    def addCurrentText(self, text: str):
+        """Keep the standalone convenience method compatible with existing callers."""
         self.setCurrentText(text)
 
     # Check variables
     def searchVariable(self, current_text: str):
+        """Update variable styling without reapplying an unchanged style sheet."""
         if current_text.startswith("[") and current_text.endswith("]"):
-            self.setStyleSheet("color: blue")
+            if self.styleSheet() != "color: blue":
+                self.setStyleSheet("color: blue")
             self.setFont(QFont(self.DEFAULT_FONT, 9, QFont.Bold))
         else:
-            self.setStyleSheet("color: black")
+            if self.styleSheet() != "color: black":
+                self.setStyleSheet("color: black")
             self.setFont(QFont(self.DEFAULT_FONT, 9, QFont.Normal))
 
     def setReg(self, reg_exp: str or list or tuple):

@@ -1,7 +1,7 @@
 import sys
 import pandas as pd
 
-from app.func import Func
+from app.psyDataFunc import PsyDataFunc as Func
 from PyQt5.QtWidgets import QTableWidget, QTableWidgetItem, QVBoxLayout, QHBoxLayout, QWidget, QLabel, QPushButton, \
     QHeaderView, QApplication, QMainWindow, QTableView, QAbstractItemView
 from PyQt5.QtCore import QAbstractTableModel, Qt, QModelIndex, pyqtSignal
@@ -61,7 +61,7 @@ class DataFrameTableWidget(QMainWindow):
 
     def initUI(self):
         self.setWindowTitle('Data Viewer')
-        self.setWindowIcon(Func.getImageObject("common/icon.png", type=1))
+        self.setWindowIcon(Func.getImageObject("icon.png", type=1))
         self.setWindowFlag(Qt.WindowStaysOnTopHint)
         self.resize(800, 600)
 
@@ -130,7 +130,7 @@ class ResultFrameTableWidget(QTableWidget):
         self.fitValueLabels = {}
 
         self.setWindowTitle('Result View')
-        self.setWindowIcon(Func.getImageObject("common/icon.png", type=1))
+        self.setWindowIcon(Func.getImageObject("icon.png", type=1))
         self.setFocusPolicy(Qt.NoFocus)
         self.setSelectionMode(QAbstractItemView.NoSelection)
         self.setAlternatingRowColors(True)

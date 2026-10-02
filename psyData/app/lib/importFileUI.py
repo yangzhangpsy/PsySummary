@@ -5,7 +5,7 @@ import pandas as pd
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QDialog, QTableWidgetItem, QMessageBox, QComboBox, QTableWidget, QPushButton, QGridLayout, QLabel, QHBoxLayout, QVBoxLayout
 
-from app.func import Func
+from app.psyDataFunc import PsyDataFunc as Func
 from app.lib import MessageBox
 from app.lib.source_file import addSourceFileColumn
 
@@ -14,7 +14,7 @@ class ImportFileUI(QDialog):
     def __init__(self, lst, files):
         super().__init__()
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)  # 去除问号按钮
-        self.setWindowIcon(Func.getImageObject("common/icon.png", type=1))
+        self.setWindowIcon(Func.getImageObject("icon.png", type=1))
 
         self.text_format_comboBox = QComboBox()
         self.delimiter_comboBox = QComboBox()

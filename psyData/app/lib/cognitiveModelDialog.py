@@ -12,7 +12,8 @@ from PyQt5.QtWidgets import (
 )
 
 from app.cognitiveModelSpec import (
-    LBA_MODEL, RATCLIFF_MODEL, RDM_MODEL, default_parameters,
+    ACCURACY_CODING, BOUNDARY_CODING_LABELS, LBA_MODEL, RATCLIFF_MODEL,
+    RESPONSE_CODING, RDM_MODEL, default_parameters,
     make_model_specification, parameter_tooltip, validate_model_specification,
 )
 
@@ -47,6 +48,9 @@ class CognitiveModelDialog(QDialog):
         self.resize(820, 760)
         self._build_ui()
         self._load_initial_state()
+        self._update_mapping_presentation()
+        self._update_validation()
+        self.accuracy_combo.currentTextChanged.connect(self._update_validation)
 
     def _build_ui(self):
         """Build the data, mapping, parameter, and optimizer controls."""
@@ -55,6 +59,12 @@ class CognitiveModelDialog(QDialog):
         data_group = QGroupBox('Data Mapping')
         data_layout = QGridLayout(data_group)
         self.rt_label = QLabel(self.rt_variable)
+        self.boundary_coding_combo = QComboBox()
+        for coding, label in BOUNDARY_CODING_LABELS.items():
+            self.boundary_coding_combo.addItem(label, coding)
+        self.boundary_coding_combo.setCurrentIndex(
+            self.boundary_coding_combo.findData(ACCURACY_CODING))
+        self.boundary_coding_combo.setVisible(self.model == RATCLIFF_MODEL)
         self.response_combo = QComboBox()
         self.accuracy_combo = QComboBox()
         self.unit_combo = QComboBox()
@@ -68,34 +78,65 @@ class CognitiveModelDialog(QDialog):
         self.response_combo.setToolTip(
             'Observed response or choice variable used to identify the winning boundary or accumulator.')
         self.accuracy_combo.setToolTip(
-            'Optional Boolean or 0/1 correctness variable used to report accuracy for each fitted group.')
+            ('Required correctness variable. Retained rows must use 1 for correct and 0 for error; '
+             'recode or exclude other and missing values in Filter Data.')
+            if self.model == RATCLIFF_MODEL else
+            'Optional 0/1 correctness variable used for descriptive accuracy output.')
+        self.boundary_coding_combo.setToolTip(
+            'Accuracy Coding fits correct/error boundaries and mirrors z and d when the correct '
+            'physical response is lower. Response Coding fits the mapped response boundaries and '
+            'reverses v when the correct physical response is lower.')
+        boundary_coding_label = QLabel('Boundary Coding:')
+        boundary_coding_label.setVisible(self.model == RATCLIFF_MODEL)
         rt_variable_label = QLabel('RT Variable:')
         rt_unit_label = QLabel('RT Unit:')
         response_variable_label = QLabel('Response Variable:')
-        accuracy_variable_label = QLabel('Accuracy/Correct Variable:')
+        accuracy_variable_label = QLabel('Accuracy Variable:')
         for label in (
-                rt_variable_label, rt_unit_label, response_variable_label,
+                boundary_coding_label, rt_variable_label, rt_unit_label, response_variable_label,
                 accuracy_variable_label):
             label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        data_layout.addWidget(rt_variable_label, 0, 0)
-        data_layout.addWidget(self.rt_label, 0, 1)
-        data_layout.addWidget(rt_unit_label, 0, 2)
-        data_layout.addWidget(self.unit_combo, 0, 3)
-        data_layout.addWidget(response_variable_label, 1, 0)
-        data_layout.addWidget(self.response_combo, 1, 1)
-        data_layout.addWidget(accuracy_variable_label, 1, 2)
-        data_layout.addWidget(self.accuracy_combo, 1, 3)
+        data_layout.addWidget(boundary_coding_label, 0, 0)
+        data_layout.addWidget(self.boundary_coding_combo, 0, 1, 1, 3)
+        data_layout.addWidget(rt_variable_label, 1, 0)
+        data_layout.addWidget(self.rt_label, 1, 1)
+        data_layout.addWidget(rt_unit_label, 1, 2)
+        data_layout.addWidget(self.unit_combo, 1, 3)
+        data_layout.addWidget(response_variable_label, 2, 0)
+        data_layout.addWidget(self.response_combo, 2, 1)
+        data_layout.addWidget(accuracy_variable_label, 2, 2)
+        data_layout.addWidget(self.accuracy_combo, 2, 3)
         data_layout.setColumnStretch(1, 1)
         data_layout.setColumnStretch(3, 1)
 
-        mapping_group = QGroupBox('Response Mapping')
-        mapping_layout = QVBoxLayout(mapping_group)
+        self.mapping_group = QGroupBox('Response Mapping')
+        mapping_layout = QVBoxLayout(self.mapping_group)
+        self.accuracy_mapping_label = QLabel('Model Boundary Mapping (from Accuracy Variable)')
+        self.accuracy_mapping_table = QTableWidget(2, 2)
+        self.accuracy_mapping_table.setHorizontalHeaderLabels(
+            ['Accuracy Value', 'Model Boundary'])
+        self.accuracy_mapping_table.horizontalHeader().setStretchLastSection(True)
+        self.accuracy_mapping_table.verticalHeader().setVisible(False)
+        self.accuracy_mapping_table.verticalHeader().setDefaultSectionSize(26)
+        self.accuracy_mapping_table.setColumnWidth(0, 220)
+        for row, (observed, boundary) in enumerate(
+                (('0 (Error)', 'lower'), ('1 (Correct)', 'upper'))):
+            for column, text in enumerate((observed, boundary)):
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                self.accuracy_mapping_table.setItem(row, column, item)
+        self._set_table_visible_rows(self.accuracy_mapping_table, 2)
+        self.physical_mapping_label = QLabel(
+            'Physical Response Mapping (used only to orient z and d)')
         self.mapping_table = QTableWidget(0, 2)
         self.mapping_table.setHorizontalHeaderLabels(['Observed Value', 'Model Response'])
         self.mapping_table.horizontalHeader().setStretchLastSection(True)
         self.mapping_table.verticalHeader().setVisible(False)
         self.mapping_table.verticalHeader().setDefaultSectionSize(26)
         self.mapping_table.setColumnWidth(0, 220)
+        mapping_layout.addWidget(self.accuracy_mapping_label)
+        mapping_layout.addWidget(self.accuracy_mapping_table)
+        mapping_layout.addWidget(self.physical_mapping_label)
         mapping_layout.addWidget(self.mapping_table)
 
         parameter_group = QGroupBox('Parameters')
@@ -152,18 +193,53 @@ class CognitiveModelDialog(QDialog):
         self.validation_label.setWordWrap(True)
         self.validation_label.setStyleSheet('color: #8b1a1a;')
         self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.button_box.button(QDialogButtonBox.Ok).setText('Save Settings')
+        self.button_box.button(QDialogButtonBox.Ok).setToolTip(
+            'Save and close, including incomplete settings. Settings are checked again before running.')
 
         root_layout.addWidget(data_group)
-        root_layout.addWidget(mapping_group)
+        root_layout.addWidget(self.mapping_group)
         root_layout.addWidget(parameter_group, 1)
         root_layout.addWidget(optimizer_group)
         root_layout.addWidget(self.validation_label)
         root_layout.addWidget(self.button_box)
 
         self.response_combo.currentTextChanged.connect(self._response_variable_changed)
+        self.boundary_coding_combo.currentIndexChanged.connect(
+            self._boundary_coding_changed)
         self.unit_combo.currentTextChanged.connect(self._reset_parameters_for_current_mapping)
         self.button_box.accepted.connect(self._accept_if_valid)
         self.button_box.rejected.connect(self.reject)
+
+    def _boundary_coding_changed(self, *_args):
+        """Refresh mapping labels and validation after changing boundary coding."""
+        self._update_mapping_presentation()
+        self._update_validation()
+
+    def _update_mapping_presentation(self):
+        """Distinguish model accuracy boundaries from physical-response orientation."""
+        accuracy_coding = (
+            self.model == RATCLIFF_MODEL
+            and self.boundary_coding_combo.currentData() == ACCURACY_CODING
+        )
+        self.accuracy_mapping_label.setVisible(accuracy_coding)
+        self.accuracy_mapping_table.setVisible(accuracy_coding)
+        self.physical_mapping_label.setVisible(accuracy_coding)
+        if accuracy_coding:
+            self.mapping_group.setTitle('Boundary Mapping')
+            self.mapping_table.setHorizontalHeaderLabels(
+                ['Observed Response', 'Physical Boundary'])
+            self.mapping_table.setToolTip(
+                'This physical response mapping does not define the fitted Correct/Error '
+                'boundaries. It determines when z is mirrored to a-z and d to -d.')
+        else:
+            self.mapping_group.setTitle(
+                'Boundary Mapping' if self.model == RATCLIFF_MODEL else 'Response Mapping')
+            headers = (['Observed Response', 'Model Boundary']
+                       if self.model == RATCLIFF_MODEL else
+                       ['Observed Value', 'Model Response'])
+            self.mapping_table.setHorizontalHeaderLabels(headers)
+            self.mapping_table.setToolTip('')
 
     def _load_initial_state(self):
         """Load an existing specification or choose conservative defaults."""
@@ -172,14 +248,23 @@ class CognitiveModelDialog(QDialog):
             signal_blockers = [
                 QSignalBlocker(self.response_combo),
                 QSignalBlocker(self.accuracy_combo),
+                QSignalBlocker(self.boundary_coding_combo),
                 QSignalBlocker(self.unit_combo),
             ]
             try:
+                for combo, field in ((self.response_combo, 'response_variable'),
+                                     (self.accuracy_combo, 'accuracy_variable')):
+                    saved_variable = specification.get(field)
+                    if saved_variable and combo.findText(saved_variable) < 0:
+                        combo.addItem(saved_variable)
                 self.response_combo.setCurrentText(
                     specification.get('response_variable') or self.NONE_LABEL)
                 self.accuracy_combo.setCurrentText(
                     specification.get('accuracy_variable') or self.NONE_LABEL)
                 self.unit_combo.setCurrentText(specification.get('rt_unit', 'seconds'))
+                boundary_coding = specification.get('boundary_coding', RESPONSE_CODING)
+                coding_index = self.boundary_coding_combo.findData(boundary_coding)
+                self.boundary_coding_combo.setCurrentIndex(max(0, coding_index))
             finally:
                 del signal_blockers
             optimizer = specification.get('optimizer', {})
@@ -204,12 +289,27 @@ class CognitiveModelDialog(QDialog):
                 len(saved_response_values) == len(response_values)
                 and set(saved_keys) == {str(value) for value in response_values}
             )
-            self._set_response_mapping(
-                response_values, specification.get('response_mapping', {}))
-            if response_set_unchanged:
+            mapping = dict(specification.get('response_mapping', {}))
+            old_indices = {}
+            if not response_set_unchanged and self.model != RATCLIFF_MODEL:
+                for index, value in enumerate(response_values, 1):
+                    old_indices[index] = mapping.get(str(value))
+                    mapping[str(value)] = index
+            self._set_response_mapping(response_values, mapping)
+            if response_set_unchanged or self.model == RATCLIFF_MODEL:
                 self._set_parameter_rows(specification.get('parameters', []))
             else:
-                self._reset_parameters_for_current_mapping()
+                saved_parameters = {row['name']: row for row in specification.get('parameters', [])}
+                parameters = default_parameters(self.model, response_values, self._minimum_rt_seconds())
+                for index, parameter in enumerate(parameters):
+                    name = parameter['name']
+                    old_name = name
+                    if '[' in name:
+                        base, suffix = name.split('[', 1)
+                        old_name = f'{base}[{old_indices.get(int(suffix[:-1]))}]'
+                    if old_name in saved_parameters:
+                        parameters[index] = dict(saved_parameters[old_name], name=name)
+                self._set_parameter_rows(parameters)
             return
 
         numeric_rt = pd.to_numeric(self.dataframe.get(self.rt_variable, pd.Series(dtype=float)), errors='coerce')
@@ -221,10 +321,12 @@ class CognitiveModelDialog(QDialog):
         if variable_name == self.NONE_LABEL or variable_name not in self.dataframe.columns:
             self._set_response_mapping([], {})
             self._set_parameter_rows([])
+            self._update_validation()
             return
         values = list(pd.unique(self.dataframe[variable_name].dropna()))
         self._set_response_mapping(values, {})
         self._reset_parameters_for_current_mapping()
+        self._update_validation()
 
     def _set_response_mapping(self, response_values, saved_mapping):
         """Populate observed response values and their model-side meanings."""
@@ -252,6 +354,7 @@ class CognitiveModelDialog(QDialog):
                 mapping_combo.setCurrentIndex(saved_index if saved_index >= 0 else row)
             self.mapping_table.setCellWidget(row, 1, mapping_combo)
             self._mapping_widgets.append(mapping_combo)
+            mapping_combo.currentIndexChanged.connect(self._update_validation)
         self._set_table_visible_rows(self.mapping_table, 2)
 
     def _minimum_rt_seconds(self):
@@ -298,6 +401,9 @@ class CognitiveModelDialog(QDialog):
             self.parameter_table.setCellWidget(row, 3, lower_edit)
             self.parameter_table.setCellWidget(row, 4, upper_edit)
             self._parameter_widgets.append((parameter['name'], mode_combo, value_edit, lower_edit, upper_edit))
+            mode_combo.currentIndexChanged.connect(self._update_validation)
+            for editor in (value_edit, lower_edit, upper_edit):
+                editor.textChanged.connect(self._update_validation)
         visible_rows = min(max(len(parameters), 6), 9)
         self._set_table_visible_rows(self.parameter_table, visible_rows)
 
@@ -343,15 +449,16 @@ class CognitiveModelDialog(QDialog):
             accuracy_variable=(None if self.accuracy_combo.currentText() == self.NONE_LABEL
                                else self.accuracy_combo.currentText()),
             rt_unit=self.unit_combo.currentText(),
+            boundary_coding=self.boundary_coding_combo.currentData(),
         )
         specification['response_mapping'] = self._current_mapping()
         specification['parameters'] = [
             {
                 'name': name,
                 'mode': mode.currentText(),
-                'value': float(value.text()),
-                'lower': float(lower.text()),
-                'upper': float(upper.text()),
+                'value': self._draft_number(value.text()),
+                'lower': self._draft_number(lower.text()),
+                'upper': self._draft_number(upper.text()),
             }
             for name, mode, value, lower, upper in self._parameter_widgets
         ]
@@ -363,24 +470,53 @@ class CognitiveModelDialog(QDialog):
         }
         return specification
 
-    def _accept_if_valid(self):
-        """Validate controls and accept only complete, identifiable models."""
+    @staticmethod
+    def _draft_number(text):
+        """Keep incomplete numeric input serializable without discarding the user's draft."""
+        try:
+            value = float(text)
+            return value if np.isfinite(value) else text
+        except ValueError:
+            return text
+
+    def _update_validation(self, *_args):
+        """Show non-blocking validation feedback while allowing settings to be saved."""
         try:
             specification = self.specification()
-            mapping_values = list(specification['response_mapping'].values())
-            if self.model == RATCLIFF_MODEL and sorted(mapping_values) != ['lower', 'upper']:
-                raise ValueError('Map one observed response to lower and the other to upper.')
             validate_model_specification(specification, self.dataframe.columns)
             accuracy_variable = specification.get('accuracy_variable')
             if accuracy_variable:
-                accuracy = pd.to_numeric(self.dataframe[accuracy_variable], errors='coerce').dropna()
-                if accuracy.empty or not set(accuracy.unique()).issubset({0, 1}):
-                    raise ValueError('Accuracy/Correct Variable must contain Boolean or numeric 0/1 values.')
+                rt = pd.to_numeric(self.dataframe[specification['rt_variable']], errors='coerce')
+                responses = self.dataframe[specification['response_variable']]
+                retained = np.isfinite(rt) & responses.notna()
+                accuracy = pd.to_numeric(
+                    self.dataframe.loc[retained, accuracy_variable], errors='coerce')
+                if accuracy.empty or not np.isfinite(accuracy).all() or not accuracy.isin([0, 1]).all():
+                    raise ValueError(
+                        'Accuracy Variable must contain only 0 (error) and 1 (correct), with no '
+                        'missing values. Recode or exclude invalid rows in Filter Data.')
         except (TypeError, ValueError) as error:
-            self.validation_label.setText(str(error))
-            QMessageBox.warning(self, 'Invalid Model Settings', str(error))
+            self.validation_label.setStyleSheet('color: #8b1a1a;')
+            self.validation_label.setText(f'{error}\nYou can save these settings now and correct them before running.')
             return
         self.validation_label.clear()
+        self.validation_label.setStyleSheet('')
+        if self.model == RATCLIFF_MODEL:
+            coding = specification.get('boundary_coding', RESPONSE_CODING)
+            if coding == ACCURACY_CODING:
+                message = (
+                    'Accuracy Coding fits Correct/Error boundaries. The physical response mapping '
+                    'is retained by using z and d for upper-correct trials and a-z and -d for '
+                    'lower-correct trials.')
+            else:
+                message = (
+                    'Response Coding fits the mapped response boundaries. Drift uses v for '
+                    'upper-correct trials and -v for lower-correct trials.')
+            self.validation_label.setText(
+                message + ' One shared parameter set is estimated from all retained trials.')
+
+    def _accept_if_valid(self):
+        """Save the current draft; execution performs strict validation separately."""
         self.accept()
 
 

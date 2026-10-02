@@ -3,15 +3,74 @@ import keyword
 import os
 import re
 import shutil
+import tempfile
 
 from PyQt5.QtCore import QRegularExpression, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QFontDatabase, QSyntaxHighlighter, QTextCharFormat, QTextCursor
-from PyQt5.QtWidgets import QTextEdit, QAction, QApplication, QFileDialog
+from PyQt5.QtWidgets import QTextEdit, QAction, QApplication, QFileDialog, QMessageBox
 
-from app.lib.dock_widget import DockWidget
+from app.lib import DockWidget
 
 
 INITIAL_SCRIPT = 'from aggregateData import AggregateData\naggData = AggregateData()'
+
+
+def export_analysis_bundle(script_path, script_text, helper_sources):
+    """Stage a complete export and restore prior files if publication fails."""
+    script_path = os.path.abspath(script_path)
+    directory, script_name = os.path.split(script_path)
+    if script_name.casefold() in {name.casefold() for name in helper_sources}:
+        raise ValueError('Choose a script filename different from the exported helper modules.')
+    names = list(helper_sources) + [script_name]
+    for name in names:
+        destination = os.path.join(directory, name)
+        if os.path.lexists(destination) and (os.path.islink(destination) or not os.path.isfile(destination)):
+            raise ValueError(f'Cannot overwrite a directory or symbolic link: {destination}')
+    staging = tempfile.mkdtemp(prefix='.psysummary-export-', dir=directory)
+    backups, published = {}, []
+    try:
+        for name, source in helper_sources.items():
+            shutil.copyfile(source, os.path.join(staging, name))
+        with open(os.path.join(staging, script_name), 'w', encoding='utf-8') as stream:
+            stream.write(script_text)
+        backup_directory = os.path.join(staging, 'backups')
+        os.mkdir(backup_directory)
+        for name in names:
+            destination = os.path.join(directory, name)
+            if os.path.exists(destination):
+                backup = os.path.join(backup_directory, name)
+                shutil.copy2(destination, backup)
+                backups[name] = backup
+        # Publish the entry script last, after all of its dependencies.
+        for name in names:
+            os.replace(os.path.join(staging, name), os.path.join(directory, name))
+            published.append(name)
+    except Exception as error:
+        recovery_errors = []
+        for name in reversed(published):
+            try:
+                destination = os.path.join(directory, name)
+                if name in backups:
+                    os.replace(backups[name], destination)
+                else:
+                    os.remove(destination)
+            except OSError as recovery_error:
+                recovery_errors.append(str(recovery_error))
+        if recovery_errors:
+            raise RuntimeError(f'Export failed: {error}. Recovery is incomplete; '
+                               f'keep the backup files in {staging}. '
+                               + '; '.join(recovery_errors)) from error
+        try:
+            shutil.rmtree(staging)
+        except OSError as cleanup_error:
+            raise RuntimeError(f'Export failed: {error}. Output files were restored, '
+                               f'but temporary files remain in {staging}: {cleanup_error}') from error
+        raise
+    try:
+        shutil.rmtree(staging)
+    except OSError as error:
+        return f'Export completed, but temporary files remain in {staging}: {error}'
+    return ''
 
 
 def makeTextFormat(color: str, bold: bool = False, italic: bool = False) -> QTextCharFormat:
@@ -139,25 +198,16 @@ class OutputTextEdit(QTextEdit):
         try:
             export_full_filename, _ = QFileDialog.getSaveFileName(self, 'Save File', '', 'Python Files (*.py)')
             if export_full_filename:
-                with open(export_full_filename, 'w') as f:
-                    f.write(self.toPlainText())
-
-                # copy the aggregateData.py file
-                app_directory = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                export_directory = os.path.join(app_directory, 'exportFiles')
-                output_path = os.path.dirname(export_full_filename)
-
-                sourceFile = os.path.join(export_directory, 'aggregateData.py')
-                shutil.copyfile(sourceFile, os.path.join(output_path, 'aggregateData.py'))
-
-                sourceFile = os.path.join(export_directory, 'rtDist.py')
-                shutil.copyfile(sourceFile, os.path.join(output_path, 'rtDist.py'))
-
+                source_directory = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                sources = {name: os.path.join(source_directory, 'exportFiles', name)
+                           for name in ('aggregateData.py', 'rtDist.py')}
                 for helper_name in ('cognitiveModels.py', 'cognitiveModelSpec.py', 'expression.py'):
-                    sourceFile = os.path.join(export_directory, helper_name)
-                    shutil.copyfile(sourceFile, os.path.join(output_path, helper_name))
+                    sources[helper_name] = os.path.join(source_directory, helper_name)
+                warning = export_analysis_bundle(export_full_filename, self.toPlainText(), sources)
+                if warning:
+                    QMessageBox.warning(self, 'Export Script', warning)
         except Exception as e:
-            print(e)
+            QMessageBox.warning(self, 'Export Script Error', str(e))
 
     def clearMe(self):
         self.setPlainText(INITIAL_SCRIPT)

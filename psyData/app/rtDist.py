@@ -1,8 +1,19 @@
 import numpy as np
 import pandas as pd
+from contextvars import ContextVar
 from matplotlib import pyplot as plt
 from scipy.stats import norm, chi2, expon, weibull_min, lognorm, invgauss, gamma
 from scipy.optimize import minimize
+
+from app.fitCancellation import FitCancelled, raise_if_fit_cancelled
+
+
+_ACTIVE_CANCEL_CHECK = ContextVar('psysummary_rt_fit_cancel_check', default=None)
+
+
+def _check_fit_cancelled():
+    """Abort the active RT likelihood evaluation when cancellation was requested."""
+    raise_if_fit_cancelled(_ACTIVE_CANCEL_CHECK.get())
 
 # reference: 1. Heathcote, A. Fitting wald and ex-wald distributions to response time data:
 # An example using functions for the S-PLUS package.
@@ -101,6 +112,7 @@ def wald_lnlike(p, x):
     Returns:
         float: negative log-likelihood
     """
+    _check_fit_cancelled()
     if len(p) == 2:
         return -np.sum(np.log(wald_pdf(x, p[0], p[1], 0)))
     else:
@@ -329,6 +341,7 @@ def ex_wald_lnlike(p, x):
     Returns:
         float: negative log-likelihood value
     """
+    _check_fit_cancelled()
     density = ex_wald_pdf(x, p[0], p[1], p[2])
     return -np.sum(np.log(density[density > 0]))
 
@@ -487,6 +500,7 @@ def ex_gaussian_lnlike_old(p, x):
     Returns:
         float: negative log-likelihood value
     """
+    _check_fit_cancelled()
     return -np.sum((((p[0] - x) / p[2]) + 0.5 * (p[1] / p[2]) ** 2) +
                    np.log(norm.cdf(((x - p[0]) / p[1]) - (p[1] / p[2])) / (p[2] * np.sqrt(2 * np.pi))))
 
@@ -495,6 +509,7 @@ def ex_gaussian_lnlike(params, rts, rt_bounds=None):
     """
     Compute the log-likelihood of response times under an ex-Gaussian model.
     """
+    _check_fit_cancelled()
     mu, sigma, tau = np.abs(params)
     # pdf_values = (1 / tau) * np.exp((mu - rts) / tau + (sigma ** 2) / (2 * tau ** 2)) * norm.cdf(
     #     (rts - mu) / sigma - sigma / tau)
@@ -611,6 +626,7 @@ def _shift_upper_bound(data):
 
 def _shifted_distribution_lnlike(params, data, distribution, data_bounds=None):
     """Compute a support-aware negative log-likelihood for a shifted distribution."""
+    _check_fit_cancelled()
     shape, scale, shift = params
     if shape <= 0 or scale <= 0 or shift < 0 or np.any(data <= shift):
         return np.inf
@@ -677,45 +693,88 @@ def weibull_lnlike(params, data, data_bounds=None):
     """
     Compute the log-likelihood of the data under a Weibull model.
     """
-    shape, scale = np.abs(params)  # Ensure positive parameters
-    pdf_values = weibull_min.pdf(data, shape, scale=scale)
-    pdf_values = np.clip(pdf_values, 1e-10, np.inf)  # Avoid log(0)
+    _check_fit_cancelled()
+    shape, scale = np.asarray(params, dtype=float)
+    if shape <= 0 or scale <= 0:
+        return 1e100
+
+    values = np.asarray(data, dtype=float)
+    with np.errstate(over='ignore', under='ignore', divide='ignore', invalid='ignore'):
+        log_pdf_values = weibull_min.logpdf(values, shape, scale=scale)
+    if not np.all(np.isfinite(log_pdf_values)):
+        return 1e100
+
+    result = -float(np.sum(log_pdf_values))
 
     if data_bounds is not None:
         lower_bound, upper_bound = data_bounds
-        if (np.min(data) < lower_bound) or (np.max(data) > upper_bound):
+        if np.min(values) < lower_bound or np.max(values) > upper_bound:
             raise ValueError("Likelihood cannot be computed if any data points are outside the bounds")
-        lost_prob = weibull_cdf(lower_bound, shape, scale) + (1 - weibull_cdf(upper_bound, shape, scale))
-        pdf_values /= (1 - lost_prob)
+        with np.errstate(over='ignore', under='ignore', divide='ignore', invalid='ignore'):
+            retained_probability = (
+                weibull_cdf(upper_bound, shape, scale)
+                - weibull_cdf(lower_bound, shape, scale)
+            )
+        if not np.isfinite(retained_probability) or not 0 < retained_probability <= 1:
+            return 1e100
+        result += values.size * np.log(retained_probability)
 
-    return -np.sum(np.log(pdf_values))
+    return result if np.isfinite(result) else 1e100
 
 
-def weibull_estimate_x(data, start_shape_vals=None, data_bounds=None, method="BFGS"):
+def weibull_estimate_x(data, start_shape_vals=None, data_bounds=None, method="L-BFGS-B"):
     weibull_estimated = weibull_estimate(data, start_shape_vals, data_bounds, method)
     return weibull_estimated['x']
 
 
-def weibull_estimate(data, start_shape_vals=None, data_bounds=None, method="BFGS"):
+def weibull_estimate(data, start_shape_vals=None, data_bounds=None, method="L-BFGS-B"):
     """
     Estimate the parameters shape and scale using maximum likelihood estimation.
     """
     if start_shape_vals is None:
         start_shape_vals = [0.5, 1.0, 1.5, 2.0]
+    if method == "BFGS":
+        method = "L-BFGS-B"
 
-    data_mean = np.mean(data)
+    values = np.asarray(data, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size < 3:
+        raise ValueError("At least three finite RT observations are required for a Weibull fit.")
+    if np.any(values <= 0):
+        raise ValueError("Weibull RT fitting requires strictly positive observations.")
+
+    data_mean = float(np.mean(values))
+    data_scale = max(float(np.max(values)), float(np.ptp(values)), 1.0)
+    parameter_bounds = [
+        (1e-4, 100.0),
+        (data_scale * 1e-8, data_scale * 100.0),
+    ]
     best_result = None
 
     for shape_guess in start_shape_vals:
-        scale_guess = data_mean / shape_guess  # Initial scale estimate
-        start_params = [shape_guess, scale_guess]
-        result = minimize(weibull_lnlike, np.array(start_params), args=(data, data_bounds), method=method)
+        _check_fit_cancelled()
+        unit_mean = float(weibull_min.mean(shape_guess, scale=1.0))
+        scale_guess = data_mean / unit_mean
+        start_params = np.array([
+            np.clip(shape_guess, *parameter_bounds[0]),
+            np.clip(scale_guess, *parameter_bounds[1]),
+        ])
+        result = minimize(
+            weibull_lnlike,
+            start_params,
+            args=(values, data_bounds),
+            method=method,
+            bounds=parameter_bounds,
+            options={'maxiter': 1000},
+        )
 
-        if best_result is None or result.fun < best_result.fun:
+        if np.isfinite(result.fun) and result.fun < 1e100 \
+                and (best_result is None or result.fun < best_result.fun):
             best_result = result
             best_result.start_shape = shape_guess
 
-    best_result.x = np.abs(best_result.x)  # Ensure parameters are positive
+    if best_result is None:
+        raise RuntimeError("No finite Weibull fit could be found.")
     return best_result
 
 
@@ -726,6 +785,7 @@ def shifted_weibull_cdf(x, shape, scale, shift):
 
 def shifted_weibull_lnlike(params, data, data_bounds=None):
     """Compute the negative log-likelihood of a shifted Weibull model."""
+    _check_fit_cancelled()
     return _shifted_distribution_lnlike(params, np.asarray(data, dtype=float), weibull_min, data_bounds)
 
 
@@ -798,6 +858,7 @@ def log_normal_lnlike(params, data, data_bounds=None):
     """
     Compute the log-likelihood of the data under a Lognormal model.
     """
+    _check_fit_cancelled()
     shape, scale = np.abs(params)  # Ensure positive parameters
     pdf_values = lognorm.pdf(data, shape, scale=scale)
     pdf_values = np.clip(pdf_values, 1e-10, np.inf)  # Avoid log(0)
@@ -847,6 +908,7 @@ def shifted_log_normal_cdf(x, shape, scale, shift):
 
 def shifted_log_normal_lnlike(params, data, data_bounds=None):
     """Compute the negative log-likelihood of a shifted lognormal model."""
+    _check_fit_cancelled()
     return _shifted_distribution_lnlike(params, np.asarray(data, dtype=float), lognorm, data_bounds)
 
 
@@ -919,6 +981,7 @@ def gamma_lnlike(params, data, data_bounds=None):
     """
     Compute the log-likelihood of the data under a Gamma model.
     """
+    _check_fit_cancelled()
     shape, scale = np.abs(params)  # Ensure positive parameters
     pdf_values = gamma.pdf(data, shape, scale=scale)
     pdf_values = np.clip(pdf_values, 1e-10, np.inf)  # Avoid log(0)
@@ -968,6 +1031,7 @@ def shifted_gamma_cdf(x, shape, scale, shift):
 
 def shifted_gamma_lnlike(params, data, data_bounds=None):
     """Compute the negative log-likelihood of a shifted gamma model."""
+    _check_fit_cancelled()
     return _shifted_distribution_lnlike(params, np.asarray(data, dtype=float), gamma, data_bounds)
 
 
@@ -1042,6 +1106,7 @@ def inverse_gaussian_lnlike(params, data, data_bounds=None):
     """
     Compute the log-likelihood of the data under an Inverse Gaussian model.
     """
+    _check_fit_cancelled()
     mu, lambda_ = params
     if mu <= 0 or lambda_ <= 0:
         return np.inf
@@ -1153,6 +1218,7 @@ def shifted_inverse_gaussian_lnlike(params, data, data_bounds=None):
     """
     Compute the log-likelihood of the data under a Shifted Inverse Gaussian model.
     """
+    _check_fit_cancelled()
     mu, lambda_, shift = params
     if mu <= 0 or lambda_ <= 0 or shift < 0 or np.any(data <= shift):
         return np.inf
@@ -1307,7 +1373,9 @@ def _rt_distribution_bounds(distribution_name, data):
     """Return diagnostic parameter bounds used by a named fit."""
     data_scale = max(float(np.max(data)), float(np.ptp(data)), 1.0)
     positive = [(1e-8, None), (1e-8, None)]
-    if distribution_name in {'Gamma (k, θ)', 'Weibull (k, θ)', 'LogNormal (k, θ)'}:
+    if distribution_name == 'Weibull (k, θ)':
+        return [(1e-4, 100.0), (data_scale * 1e-8, data_scale * 100.0)]
+    if distribution_name in {'Gamma (k, θ)', 'LogNormal (k, θ)'}:
         return [(0.0, None), (0.0, None)]
     if distribution_name in {
         'Shifted Gamma (k, θ, shift)',
@@ -1339,7 +1407,7 @@ def _near_bound(value, lower, upper):
     return any(abs(value - bound) <= tolerance for bound in finite_bounds)
 
 
-def fit_rt_distribution(data, distribution_name):
+def fit_rt_distribution(data, distribution_name, cancel_check=None):
     """Fit an RT distribution and return parameters, diagnostics, and plot data."""
     values = np.asarray(data, dtype=float)
     values = values[np.isfinite(values)]
@@ -1361,9 +1429,15 @@ def fit_rt_distribution(data, distribution_name):
         'message': '',
     }
     try:
+        raise_if_fit_cancelled(cancel_check)
         if n_valid < 3:
             raise ValueError('At least three finite observations are required.')
-        result = _rt_distribution_estimator(distribution_name)(values)
+        cancel_token = _ACTIVE_CANCEL_CHECK.set(cancel_check)
+        try:
+            result = _rt_distribution_estimator(distribution_name)(values)
+        finally:
+            _ACTIVE_CANCEL_CHECK.reset(cancel_token)
+        raise_if_fit_cancelled(cancel_check)
         parameters = np.asarray(result.x, dtype=float)
         negative_log_likelihood = float(result.fun)
         converged = bool(
@@ -1398,6 +1472,8 @@ def fit_rt_distribution(data, distribution_name):
             'bic': parameter_count * np.log(n_valid) - 2 * log_likelihood,
             'message': str(result.message),
         })
+    except FitCancelled:
+        raise
     except Exception as error:
         failure['message'] = str(error)
     return failure

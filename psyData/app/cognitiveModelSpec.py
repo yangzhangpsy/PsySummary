@@ -1,6 +1,10 @@
 """Shared model specifications for PsySummary cognitive RT models."""
 
 from copy import deepcopy
+import math
+
+import numpy as np
+import pandas as pd
 
 
 RATCLIFF_MODEL = 'Ratcliff Diffusion Model'
@@ -8,8 +12,14 @@ LBA_MODEL = 'Linear Ballistic Accumulator'
 RDM_MODEL = 'Racing Diffusion Model'
 
 COGNITIVE_MODEL_NAMES = (RATCLIFF_MODEL, LBA_MODEL, RDM_MODEL)
-MODEL_SPEC_SCHEMA_VERSION = 1
+MODEL_SPEC_SCHEMA_VERSION = 2
 RTDISTS_REFERENCE_VERSION = '0.12-0'
+ACCURACY_CODING = 'accuracy'
+RESPONSE_CODING = 'response'
+BOUNDARY_CODING_LABELS = {
+    ACCURACY_CODING: 'Accuracy Coding (Correct / Error)',
+    RESPONSE_CODING: 'Response Coding (Choice / Direction)',
+}
 
 MODEL_REFERENCES = {
     RATCLIFF_MODEL: (
@@ -65,14 +75,17 @@ def parameter_tooltip(model, parameter_name):
         return {
             'a': ('Threshold separation. It is the distance between the lower and upper '
                   'decision boundaries; larger values indicate more cautious responding.'),
-            'v': ('Mean drift rate. Positive values favor the upper response boundary and '
-                  'negative values favor the lower response boundary.'),
+            'v': ('Mean evidence drift toward the correct response. During fitting, its direction '
+                  'is oriented from Accuracy and the configured physical response boundaries; '
+                  'positive values favor the correct response.'),
             't0': ('Lower bound of non-decision time in seconds, covering processes such as '
                    'stimulus encoding and response execution.'),
-            'z': ('Absolute starting point between 0 and a. Values away from a / 2 represent '
-                  'an initial bias toward one response boundary.'),
-            'd': ('Difference in response-execution time between boundaries, in seconds. '
-                  'Positive values make upper-boundary execution faster than lower-boundary execution.'),
+            'z': ('Absolute starting point between 0 and a in the configured physical-response '
+                  'coordinates. Accuracy Coding mirrors it to a-z when the correct physical '
+                  'response is lower.'),
+            'd': ('Physical lower/upper response-execution-time difference in seconds. Positive '
+                  'values make the configured upper response faster; Accuracy Coding reverses its '
+                  'sign when the correct physical response is lower.'),
             'sz': ('Across-trial range of starting-point variability. Trial starting points '
                    'are uniformly distributed around z with total width sz.'),
             'sv': ('Across-trial standard deviation of drift rate. Trial drift rates follow '
@@ -182,7 +195,8 @@ def default_parameters(model, response_values, minimum_rt=0.2):
 
 
 def make_model_specification(model, rt_variable, response_variable, response_values,
-                             minimum_rt=0.2, accuracy_variable=None, rt_unit='seconds'):
+                             minimum_rt=0.2, accuracy_variable=None, rt_unit='seconds',
+                             boundary_coding=ACCURACY_CODING):
     """Build a complete default specification for one cognitive RT model."""
     values = [_serializable_response_value(value) for value in response_values]
     return {
@@ -191,6 +205,8 @@ def make_model_specification(model, rt_variable, response_variable, response_val
         'rt_variable': rt_variable,
         'response_variable': response_variable,
         'accuracy_variable': accuracy_variable or None,
+        'boundary_coding': (
+            boundary_coding if model == RATCLIFF_MODEL else RESPONSE_CODING),
         'rt_unit': rt_unit,
         'response_values': values,
         'response_mapping': {
@@ -220,8 +236,13 @@ def validate_model_specification(specification, available_variables=None):
     if rt_variable == response_variable:
         raise ValueError('RT Variable and Response Variable must be different variables.')
     accuracy_variable = specification.get('accuracy_variable')
+    boundary_coding = specification.get('boundary_coding', RESPONSE_CODING)
+    if model == RATCLIFF_MODEL and boundary_coding not in BOUNDARY_CODING_LABELS:
+        raise ValueError(f'Unsupported Ratcliff boundary coding: {boundary_coding}.')
+    if model == RATCLIFF_MODEL and not accuracy_variable:
+        raise ValueError('Ratcliff Diffusion Model requires an Accuracy Variable containing 0 or 1.')
     if accuracy_variable and accuracy_variable in (rt_variable, response_variable):
-        raise ValueError('Accuracy/Correct Variable must differ from RT and Response variables.')
+        raise ValueError('Accuracy Variable must differ from RT and Response variables.')
     if available_variables is not None:
         missing = [name for name in (rt_variable, response_variable,
                                      specification.get('accuracy_variable'))
@@ -230,7 +251,11 @@ def validate_model_specification(specification, available_variables=None):
             raise ValueError(f"Model variable(s) are unavailable: {', '.join(missing)}.")
     response_values = specification.get('response_values') or []
     if model == RATCLIFF_MODEL and len(response_values) != 2:
-        raise ValueError('Ratcliff Diffusion Model requires exactly two response values.')
+        raise ValueError(
+            f"Ratcliff Diffusion Model requires exactly two response values (2 distinct values). "
+            f"Response Variable '{response_variable}' has {len(response_values)} configured values: "
+            f"{response_values}. Use Define Filters to retain the intended two responses, "
+            'then reopen Model Settings and check their lower/upper mapping.')
     if model in (LBA_MODEL, RDM_MODEL) and len(response_values) < 2:
         raise ValueError(f'{model} requires at least two response values.')
     response_mapping = specification.get('response_mapping') or {}
@@ -254,9 +279,14 @@ def validate_model_specification(specification, available_variables=None):
         mode = parameter.get('mode')
         if mode not in ('fixed', 'free'):
             raise ValueError(f"Parameter '{name}' must be Fixed or Free.")
-        lower = float(parameter.get('lower'))
-        upper = float(parameter.get('upper'))
-        value = float(parameter.get('value'))
+        try:
+            lower = float(parameter.get('lower'))
+            upper = float(parameter.get('upper'))
+            value = float(parameter.get('value'))
+        except (TypeError, ValueError):
+            raise ValueError(f"Parameter '{name}': Value/Start, Lower and Upper must be finite numbers.") from None
+        if not all(math.isfinite(number) for number in (lower, upper, value)):
+            raise ValueError(f"Parameter '{name}': Value/Start, Lower and Upper must be finite numbers.")
         if lower >= upper or not lower <= value <= upper:
             raise ValueError(f"Parameter '{name}' must satisfy Lower <= Value/Start <= Upper.")
 
@@ -290,3 +320,51 @@ def validate_model_specification(specification, available_variables=None):
                 value < 0 for name, value in values.items() if name.startswith('v[')):
             raise ValueError('RDM drift rates cannot be negative.')
     return specification
+
+
+def validate_model_data(specification, dataframe, group_vars=()):
+    """Validate a saved model against current filtered data before any fitting starts."""
+    model = specification.get('model')
+    variable = specification.get('response_variable')
+    if variable in dataframe.columns:
+        observed = list(pd.unique(dataframe[variable].dropna()))
+        if model == RATCLIFF_MODEL and len(observed) != 2:
+            raise ValueError(
+                f"{model} requires exactly 2 distinct response values. Response Variable "
+                f"'{variable}' contains {len(observed)} values after the current filters: {observed}. "
+                'Use Define Filters to retain the intended two responses, then reopen Model Settings '
+                'and map one to lower and the other to upper.')
+    validate_model_specification(specification, dataframe.columns)
+    configured = {str(value) for value in specification['response_values']}
+    actual = {str(value) for value in observed}
+    if actual != configured:
+        raise ValueError(
+            f"Response Variable '{variable}' no longer matches the saved response mapping. "
+            f"Current filtered values: {observed}; saved values: {specification['response_values']}. "
+            'Check Define Filters and reopen Model Settings to update the mapping.')
+    if dataframe.empty:
+        raise ValueError('No rows remain after applying the current filters.')
+    groups = dataframe.groupby(list(group_vars), dropna=False, sort=False) if group_vars else [((), dataframe)]
+    for key, frame in groups:
+        keys = key if isinstance(key, tuple) else (key,)
+        label = ', '.join(f'{name}={value}' for name, value in zip(group_vars, keys)) or 'Overall'
+        rt = pd.to_numeric(frame[specification['rt_variable']], errors='coerce')
+        valid = np.isfinite(rt) & frame[variable].notna()
+        present = {str(value) for value in frame.loc[valid, variable]}
+        if not present:
+            raise ValueError(
+                f"Group [{label}]: no valid RT/response pairs remain after filtering. "
+                'Check filters, grouping and Model Settings.')
+        accuracy_variable = specification.get('accuracy_variable')
+        if accuracy_variable:
+            accuracy = pd.to_numeric(frame.loc[valid, accuracy_variable], errors='coerce')
+            if accuracy.empty or not np.isfinite(accuracy).all() or not accuracy.isin([0, 1]).all():
+                raise ValueError(
+                    f"Group [{label}]: Accuracy Variable '{accuracy_variable}' must contain "
+                    'only 0 (error) and 1 (correct), with no missing values, for every retained '
+                    'RT/response pair. Recode or exclude invalid rows in Filter Data before running.')
+
+
+def model_result_parameters(specification):
+    """Return the one shared parameter set reported for either boundary coding."""
+    return specification['parameters']

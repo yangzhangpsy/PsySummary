@@ -1,45 +1,26 @@
 # -*- mode: python ; coding: utf-8 -*-
+# Windows and Linux use the same one-folder application layout.
+from pathlib import Path
 
-
+root = Path(SPECPATH).resolve()
 a = Analysis(
-    ['PsySummary.py'],
-    pathex=['C:\\Users\\Yang\\PycharmProjects\\psyData'],
-    binaries=[],
-    datas=[('.\\app\\exportFiles', '.\\app\\exportFiles'), ('.\\app\\images', '.\\app\\images'), ('.\\app\\demoData', '.\\app\\demoData')],
-    hiddenimports=['pkg_resources.py2_warn', 'pkg_resources.extern'],
-    hookspath=[],
-    hooksconfig={},
-    runtime_hooks=[],
-    excludes=[],
+    [str(root / 'PsySummary.py')], pathex=[str(root)], binaries=[],
+    datas=[
+        (str(root / 'app' / 'images'), 'app/images'),
+        (str(root / 'app' / 'demoData'), 'app/demoData'),
+        (str(root / 'app' / 'exportFiles'), 'app/exportFiles'),
+        # Script export needs source files, not just bundled PYZ bytecode.
+        (str(root / 'app' / 'cognitiveModels.py'), 'app'),
+        (str(root / 'app' / 'cognitiveModelSpec.py'), 'app'),
+    ],
+    hiddenimports=['matplotlib.backends.backend_qt5agg'],
+    hookspath=[], runtime_hooks=[], excludes=['PyQt6', 'PySide6', 'PySide2'],
     noarchive=False,
-    optimize=0,
 )
 pyz = PYZ(a.pure)
-
 exe = EXE(
-    pyz,
-    a.scripts,
-    [],
-    exclude_binaries=True,
-    name='PsySummary',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=['.\\app\\images\\psybuilder.ico'],
+    pyz, a.scripts, [], exclude_binaries=True, name='PsySummary',
+    debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
+    console=False, icon=str(root / 'app' / 'images' / 'psybuilder.ico'),
 )
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name='PsySummary',
-)
+coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name='PsySummary')

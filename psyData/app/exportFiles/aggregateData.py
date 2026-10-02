@@ -1,6 +1,7 @@
 import csv
 import os
 import re
+from expression import prepare_variable, evaluate_expression, to_aggregate_expression, runBoxcox
 from operator import lt, le, ge, gt
 
 import mat73
@@ -9,7 +10,6 @@ import numpy as np
 import pandas as pd
 from scipy.io import loadmat
 from scipy.optimize import minimize
-from scipy.stats import boxcox
 
 from rtDist import gamma_estimate_x, shifted_gamma_estimate_x, wald_estimate_x, ex_wald_estimate_x, \
     ex_gaussian_estimate_x, inverse_gaussian_estimate_x, shifted_inverse_gaussian_estimate_x, \
@@ -17,14 +17,8 @@ from rtDist import gamma_estimate_x, shifted_gamma_estimate_x, wald_estimate_x, 
     shift_wald_estimate_x, CDF_pooling_main, FIT_DIAGNOSTIC_NAMES, fit_rt_distribution_values
 from cognitiveModels import fit_cognitive_model
 from cognitiveModelSpec import (
-    COGNITIVE_MODEL_NAMES, cognitive_model_reference_text, split_target,
+    COGNITIVE_MODEL_NAMES, cognitive_model_reference_text, split_target, model_result_parameters, validate_model_data,
 )
-from expression import evaluate_aggregate_expression
-
-
-def runBoxcox(values):
-    transformed, _optimal_lambda = boxcox(values)
-    return transformed
 
 
 CONDITION_WISE_FILTER_REFERENCE = (
@@ -105,6 +99,16 @@ def executeDataFilter(dataFrame, variableName: str, compareType: str, value):
 
 def contains_empty_list(x):
     return any(hasattr(item, '__len__') and len(item) == 0 for item in x)
+
+
+def normalizeCalculateExpression(expression):
+    """Normalize legacy data references while preserving literal column names."""
+    return to_aggregate_expression(expression)
+
+
+def evaluateCalculateExpression(expression, aggregate_data):
+    """Use the same approved operations as the GUI expression editor."""
+    return evaluate_expression(expression, aggregate_data.data)
 
 
 def getStandardError(x):
@@ -611,9 +615,13 @@ class AggregateData(object):
             data_frames.append(self.data)
         self.data = pd.concat(data_frames, ignore_index=True)
 
-    def calculateVariable(self, target_variable_name, calculate_expression):
-        self.data[target_variable_name] = evaluate_aggregate_expression(
-            calculate_expression, self, np, runBoxcox)
+    def calculateVariable(self, target_variable_name, calculate_expression, allow_nonfinite=False):
+        """Create a validated column, requiring acknowledgement of non-finite results."""
+        name, column, _source, warning = prepare_variable(
+            target_variable_name, calculate_expression, self.data)
+        if warning and not allow_nonfinite:
+            raise ValueError(warning + ' Use allow_nonfinite=True only after reviewing these values.')
+        self.data[name] = column
 
     def filterData(self, row_vars, col_vars, ruleList, omegaValues=None):
         if omegaValues is None:
@@ -626,6 +634,7 @@ class AggregateData(object):
         if omegaValues is None:
             omegaValues = [-1 for _ in ruleList]
 
+        self.resultList = []
         warnConditionWiseFiltering(row_vars, col_vars, self.data, ruleList)
 
         for target_var in target_vars:
@@ -726,9 +735,10 @@ class AggregateData(object):
                         f'{target_var_name}@{operation} has no saved model settings.')
                 print(cognitive_model_reference_text(operation))
                 group_vars = row_vars + col_vars
+                validate_model_data(specification, tmpDataFrame, group_vars)
 
                 def fit_model_group(group_frame):
-                    fit = fit_cognitive_model(group_frame, specification)
+                    fit = fit_cognitive_model(group_frame, specification, validate=False)
                     diagnostics = [
                         fit['n_valid'], 'Yes' if fit['converged'] else 'No',
                         str(fit['response_counts'])]
@@ -750,7 +760,7 @@ class AggregateData(object):
                 result = groupby_to_pivot_tables(grouped_result, row_vars, col_vars)
                 parameter_names = [
                     f"{parameter['name']} ({parameter['mode'].capitalize()})"
-                    for parameter in specification['parameters']
+                    for parameter in model_result_parameters(specification)
                 ]
                 diagnostic_names = [
                     'N valid', 'Converged', 'Response counts', 'Log-likelihood', 'AIC', 'BIC']

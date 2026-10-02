@@ -677,45 +677,86 @@ def weibull_lnlike(params, data, data_bounds=None):
     """
     Compute the log-likelihood of the data under a Weibull model.
     """
-    shape, scale = np.abs(params)  # Ensure positive parameters
-    pdf_values = weibull_min.pdf(data, shape, scale=scale)
-    pdf_values = np.clip(pdf_values, 1e-10, np.inf)  # Avoid log(0)
+    shape, scale = np.asarray(params, dtype=float)
+    if shape <= 0 or scale <= 0:
+        return 1e100
+
+    values = np.asarray(data, dtype=float)
+    with np.errstate(over='ignore', under='ignore', divide='ignore', invalid='ignore'):
+        log_pdf_values = weibull_min.logpdf(values, shape, scale=scale)
+    if not np.all(np.isfinite(log_pdf_values)):
+        return 1e100
+
+    result = -float(np.sum(log_pdf_values))
 
     if data_bounds is not None:
         lower_bound, upper_bound = data_bounds
-        if (np.min(data) < lower_bound) or (np.max(data) > upper_bound):
+        if np.min(values) < lower_bound or np.max(values) > upper_bound:
             raise ValueError("Likelihood cannot be computed if any data points are outside the bounds")
-        lost_prob = weibull_cdf(lower_bound, shape, scale) + (1 - weibull_cdf(upper_bound, shape, scale))
-        pdf_values /= (1 - lost_prob)
+        with np.errstate(over='ignore', under='ignore', divide='ignore', invalid='ignore'):
+            retained_probability = (
+                weibull_cdf(upper_bound, shape, scale)
+                - weibull_cdf(lower_bound, shape, scale)
+            )
+        if not np.isfinite(retained_probability) or not 0 < retained_probability <= 1:
+            return 1e100
+        result += values.size * np.log(retained_probability)
 
-    return -np.sum(np.log(pdf_values))
+    return result if np.isfinite(result) else 1e100
 
 
-def weibull_estimate_x(data, start_shape_vals=None, data_bounds=None, method="BFGS"):
+def weibull_estimate_x(data, start_shape_vals=None, data_bounds=None, method="L-BFGS-B"):
     weibull_estimated = weibull_estimate(data, start_shape_vals, data_bounds, method)
     return weibull_estimated['x']
 
 
-def weibull_estimate(data, start_shape_vals=None, data_bounds=None, method="BFGS"):
+def weibull_estimate(data, start_shape_vals=None, data_bounds=None, method="L-BFGS-B"):
     """
     Estimate the parameters shape and scale using maximum likelihood estimation.
     """
     if start_shape_vals is None:
         start_shape_vals = [0.5, 1.0, 1.5, 2.0]
+    if method == "BFGS":
+        method = "L-BFGS-B"
 
-    data_mean = np.mean(data)
+    values = np.asarray(data, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size < 3:
+        raise ValueError("At least three finite RT observations are required for a Weibull fit.")
+    if np.any(values <= 0):
+        raise ValueError("Weibull RT fitting requires strictly positive observations.")
+
+    data_mean = float(np.mean(values))
+    data_scale = max(float(np.max(values)), float(np.ptp(values)), 1.0)
+    parameter_bounds = [
+        (1e-4, 100.0),
+        (data_scale * 1e-8, data_scale * 100.0),
+    ]
     best_result = None
 
     for shape_guess in start_shape_vals:
-        scale_guess = data_mean / shape_guess  # Initial scale estimate
-        start_params = [shape_guess, scale_guess]
-        result = minimize(weibull_lnlike, np.array(start_params), args=(data, data_bounds), method=method)
+        unit_mean = float(weibull_min.mean(shape_guess, scale=1.0))
+        scale_guess = data_mean / unit_mean
+        start_params = np.array([
+            np.clip(shape_guess, *parameter_bounds[0]),
+            np.clip(scale_guess, *parameter_bounds[1]),
+        ])
+        result = minimize(
+            weibull_lnlike,
+            start_params,
+            args=(values, data_bounds),
+            method=method,
+            bounds=parameter_bounds,
+            options={'maxiter': 1000},
+        )
 
-        if best_result is None or result.fun < best_result.fun:
+        if np.isfinite(result.fun) and result.fun < 1e100 \
+                and (best_result is None or result.fun < best_result.fun):
             best_result = result
             best_result.start_shape = shape_guess
 
-    best_result.x = np.abs(best_result.x)  # Ensure parameters are positive
+    if best_result is None:
+        raise RuntimeError("No finite Weibull fit could be found.")
     return best_result
 
 
@@ -1299,7 +1340,9 @@ def _rt_distribution_bounds(distribution_name, data):
     """Return diagnostic parameter bounds used by a named fit."""
     data_scale = max(float(np.max(data)), float(np.ptp(data)), 1.0)
     positive = [(1e-8, None), (1e-8, None)]
-    if distribution_name in {'Gamma (k, θ)', 'Weibull (k, θ)', 'LogNormal (k, θ)'}:
+    if distribution_name == 'Weibull (k, θ)':
+        return [(1e-4, 100.0), (data_scale * 1e-8, data_scale * 100.0)]
+    if distribution_name in {'Gamma (k, θ)', 'LogNormal (k, θ)'}:
         return [(0.0, None), (0.0, None)]
     if distribution_name in {'Shifted Gamma (k, θ, shift)', 'Shifted Weibull (k, θ, shift)', 'Shifted LogNormal (k, θ, shift)'}:
         return [(1e-4, 100.0), (data_scale * 1e-8, data_scale * 100.0), (0.0, _shift_upper_bound(data))]
