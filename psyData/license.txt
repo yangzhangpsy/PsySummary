@@ -1,0 +1,3 @@
+PsySummary (ver 0.1) for Psychtoolbox 3 under MATLAB was developed by the group leaded by Prof. Yang Zhang at Attention and Perception lab at Soochow university, Suzhou, China.
+
+PsySummary 0.1 are provided as is, no warranty for their  correctness or usefulness for any purpose is made or implied by the authors of the software, or by anyone else. This software  is designed for research purposes only and not to be used for any business purpose, such as, but not limited to, business training.
