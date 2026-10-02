@@ -1,7 +1,7 @@
-import ast
 import csv
 import os
 import re
+from expression import prepare_variable, evaluate_expression, to_aggregate_expression, runBoxcox
 from operator import lt, le, ge, gt
 
 import mat73
@@ -10,7 +10,6 @@ import numpy as np
 import pandas as pd
 from scipy.io import loadmat
 from scipy.optimize import minimize
-from scipy.stats import boxcox
 
 from rtDist import gamma_estimate_x, shifted_gamma_estimate_x, wald_estimate_x, ex_wald_estimate_x, \
     ex_gaussian_estimate_x, inverse_gaussian_estimate_x, shifted_inverse_gaussian_estimate_x, \
@@ -102,113 +101,14 @@ def contains_empty_list(x):
     return any(hasattr(item, '__len__') and len(item) == 0 for item in x)
 
 
-def runBoxcox(df):
-    df, optimal_lambda = boxcox(df)
-    return df
+def normalizeCalculateExpression(expression):
+    """Normalize legacy data references while preserving literal column names."""
+    return to_aggregate_expression(expression)
 
-def getAttributeChain(node):
-    parts = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
 
-    if isinstance(node, ast.Name):
-        parts.append(node.id)
-        return ".".join(reversed(parts))
-    return None
-
-class AggregateDataExpressionValidator(ast.NodeVisitor):
-    allowedCalls = {'runBoxcox', 'np.log', 'np.exp', 'np.logical_and', 'np.logical_or'}
-    allowedAttributes = {'self.data', 'np.log', 'np.exp', 'np.logical_and', 'np.logical_or'}
-    allowedNames = {'self', 'np', 'runBoxcox'}
-    allowedBinaryOperators = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.BitAnd, ast.BitOr)
-    allowedUnaryOperators = (ast.UAdd, ast.USub, ast.Invert)
-    allowedCompareOperators = (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)
-
-    def generic_visit(self, node):
-        raise ValueError(f"Unsupported expression element: {type(node).__name__}")
-
-    def visit_Expression(self, node):
-        self.visit(node.body)
-
-    def visit_Name(self, node):
-        if node.id not in self.allowedNames:
-            raise ValueError(f"Unsupported name in expression: {node.id}")
-
-    def visit_Attribute(self, node):
-        attribute_chain = getAttributeChain(node)
-        if attribute_chain not in self.allowedAttributes:
-            raise ValueError(f"Unsupported attribute access in expression: {attribute_chain}")
-
-    def visit_Constant(self, node):
-        return None
-
-    def visit_List(self, node):
-        for element in node.elts:
-            self.visit(element)
-
-    def visit_Tuple(self, node):
-        for element in node.elts:
-            self.visit(element)
-
-    def visit_Subscript(self, node):
-        self.visit(node.value)
-        self.visit(node.slice)
-
-    def visit_Slice(self, node):
-        if node.lower is not None:
-            self.visit(node.lower)
-        if node.upper is not None:
-            self.visit(node.upper)
-        if node.step is not None:
-            self.visit(node.step)
-
-    def visit_BinOp(self, node):
-        if not isinstance(node.op, self.allowedBinaryOperators):
-            raise ValueError(f"Unsupported operator in expression: {type(node.op).__name__}")
-        self.visit(node.left)
-        self.visit(node.right)
-
-    def visit_UnaryOp(self, node):
-        if not isinstance(node.op, self.allowedUnaryOperators):
-            raise ValueError(f"Unsupported unary operator in expression: {type(node.op).__name__}")
-        self.visit(node.operand)
-
-    def visit_Compare(self, node):
-        self.visit(node.left)
-        for operator in node.ops:
-            if not isinstance(operator, self.allowedCompareOperators):
-                raise ValueError(f"Unsupported comparison operator in expression: {type(operator).__name__}")
-        for comparator in node.comparators:
-            self.visit(comparator)
-
-    def visit_Call(self, node):
-        if isinstance(node.func, ast.Name):
-            func_name = node.func.id
-        else:
-            func_name = getAttributeChain(node.func)
-
-        if func_name not in self.allowedCalls:
-            raise ValueError(f"Unsupported function in expression: {func_name}")
-
-        for arg in node.args:
-            self.visit(arg)
-
-        for keyword in node.keywords:
-            if keyword.arg is None:
-                raise ValueError("Unsupported keyword expansion in expression.")
-            self.visit(keyword.value)
-
-def normalizeCalculateExpression(expression: str):
-    return expression.replace('aggData.data', 'self.data').replace('self.dataFrame', 'self.data')
-
-def evaluateCalculateExpression(expression: str, aggregate_data):
-    normalized_expression = normalizeCalculateExpression(expression)
-    parsed_expression = ast.parse(normalized_expression, mode='eval')
-    AggregateDataExpressionValidator().visit(parsed_expression)
-    compiled_expression = compile(parsed_expression, '<aggregate-data-expression>', 'eval')
-    return eval(compiled_expression, {'__builtins__': {}},
-                {'self': aggregate_data, 'np': np, 'runBoxcox': runBoxcox})
+def evaluateCalculateExpression(expression, aggregate_data):
+    """Use the same approved operations as the GUI expression editor."""
+    return evaluate_expression(expression, aggregate_data.data)
 
 
 def getStandardError(x):
@@ -715,8 +615,13 @@ class AggregateData(object):
             data_frames.append(self.data)
         self.data = pd.concat(data_frames, ignore_index=True)
 
-    def calculateVariable(self, target_variable_name, calculate_expression):
-        self.data[target_variable_name] = evaluateCalculateExpression(calculate_expression, self)
+    def calculateVariable(self, target_variable_name, calculate_expression, allow_nonfinite=False):
+        """Create a validated column, requiring acknowledgement of non-finite results."""
+        name, column, _source, warning = prepare_variable(
+            target_variable_name, calculate_expression, self.data)
+        if warning and not allow_nonfinite:
+            raise ValueError(warning + ' Use allow_nonfinite=True only after reviewing these values.')
+        self.data[name] = column
 
     def filterData(self, row_vars, col_vars, ruleList, omegaValues=None):
         if omegaValues is None:

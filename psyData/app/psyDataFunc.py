@@ -12,6 +12,8 @@ class PsyDataFunc(object):
     This class is used to store the information of the data file.
     """
 
+    _imageObjectCache = {}
+
     @staticmethod
     def printOut(information: str, information_type: int = 0, showTime=True):
         """
@@ -32,11 +34,17 @@ class PsyDataFunc(object):
         append analysis script to the end of the script.
         :param script: analysis script
         """
-        if isinstance(script, list):
-            for cScript in script:
-                PsyDataInfo.PsyData.script_dock.printOut(cScript)
-        elif isinstance(script, str):
-            PsyDataInfo.PsyData.script_dock.printOut(script)
+        dock = PsyDataInfo.PsyData.script_dock
+        previous_text = dock.text_edit.toPlainText()
+        try:
+            if isinstance(script, list):
+                for cScript in script:
+                    dock.printOut(cScript)
+            elif isinstance(script, str):
+                dock.printOut(script)
+        except Exception:
+            dock.text_edit.setPlainText(previous_text)
+            raise
 
     @staticmethod
     def list2Script(var_list: list, var_list_name: str):
@@ -59,20 +67,29 @@ class PsyDataFunc(object):
         """
 
         path = os.path.join(PsyDataInfo.MAIN_DIR, "images", *(re.split(r'[\\/]', image_path)))
+        size_key = (size.width(), size.height()) if size else None
+        cache_key = (path, type, size_key)
 
-        # PsyDataInfo.PsyData.output.printOut(f"{path}", 0, True)
+        if type in (0, 1) and cache_key in PsyDataFunc._imageObjectCache:
+            cached_object = PsyDataFunc._imageObjectCache[cache_key]
+            return QPixmap(cached_object) if type == 0 else QIcon(cached_object)
 
         if type == 0:
             if size:
-                return QPixmap(path).scaled(size, transformMode=Qt.SmoothTransformation)
-            return QPixmap(path)
+                image_object = QPixmap(path).scaled(size, transformMode=Qt.SmoothTransformation)
+            else:
+                image_object = QPixmap(path)
+            PsyDataFunc._imageObjectCache[cache_key] = image_object
+            return QPixmap(image_object)
         elif type == 1:
             if size:
-                return QIcon(QPixmap(path).scaled(size, transformMode=Qt.SmoothTransformation))
-            return QIcon(path)
+                image_object = QIcon(QPixmap(path).scaled(size, transformMode=Qt.SmoothTransformation))
+            else:
+                image_object = QIcon(path)
+            PsyDataFunc._imageObjectCache[cache_key] = image_object
+            return QIcon(image_object)
         elif type == 2:
             movie = QMovie(path)
             if size:
                 movie.setScaledSize(size)
             return movie
-
