@@ -168,6 +168,7 @@ class PsyData(QMainWindow):
         self.dataReadStart = False
         self.model_fit_running = False
         self._closing_after_model_cancel = False
+        self._closing_after_variable_compute = False
         self._menu_enabled_before_model_fit = True
         self.is_windows = Info.OS_TYPE == 0
         self.files = None
@@ -185,7 +186,7 @@ class PsyData(QMainWindow):
         self.setWindowIcon(Func.getImageObject("icon.png", type=1))
         # set the central widget
         self.central_widget = QWidget()
-        self.computationVariableGui = VariableCompute(self.data)
+        self.computationVariableGui = VariableCompute(self.data, self)
 
         # self.setStyleSheet(default_qss)
 
@@ -329,6 +330,7 @@ class PsyData(QMainWindow):
         self.results_toggle_button.clicked.connect(self._toggleAggregationResults)
 
         self.computationVariableGui.transformFinished.connect(self.transformVariable)
+        self.computationVariableGui.computationRunningChanged.connect(self._variableComputationStateChanged)
 
         self.instruct_lab = QLabel()
 
@@ -463,6 +465,8 @@ drag the variable back to the variable list.
 
     def openDataFiles(self, files):
         """Open one or more supported data files through the normal import workflow."""
+        if self._variableCalculationBusy('loading data'):
+            return False
         files = self.normalizeRecentFilePaths(files)
         if not files:
             return
@@ -725,6 +729,8 @@ drag the variable back to the variable list.
 
     # filter 触发事件
     def defineFilterEvent(self):
+        if self._variableCalculationBusy('defining filters'):
+            return False
         if self.data is None or self.data.size == 0:
             MessageBox.information(self, 'Warning', "No data exist, please load data first.")
             return False
@@ -735,6 +741,8 @@ drag the variable back to the variable list.
 
     def showDistributionPreview(self):
         """Open a before/after visualization using the active PsySummary filters."""
+        if self._variableCalculationBusy('previewing filter effects'):
+            return False
         if self.model_fit_running:
             self._showModelFitBusyMessage('previewing filter effects')
             return False
@@ -789,6 +797,8 @@ drag the variable back to the variable list.
 
     # 运行分析程序
     def runSummary(self):
+        if self._variableCalculationBusy('running an analysis'):
+            return None
         if self.model_fit_running:
             self._showModelFitBusyMessage()
             return None
@@ -1088,6 +1098,11 @@ drag the variable back to the variable list.
         self._syncAggregationResultsControls()
 
     def closeEvent(self, event):
+        if self.computationVariableGui.computation_running:
+            if self.computationVariableGui.requestCancelAndClose(close_parent=True):
+                self._closing_after_variable_compute = True
+            event.ignore()
+            return
         if self.model_fit_running:
             if self._closing_after_model_cancel:
                 event.ignore()
@@ -1141,6 +1156,20 @@ drag the variable back to the variable list.
 
         self.variables_list.addItem(newVariableName)
         self.variables_list.sortItems(Qt.AscendingOrder)
+
+    def _variableCalculationBusy(self, action):
+        """Prevent source-data changes or competing analyses during a calculation."""
+        if not self.computationVariableGui.computation_running:
+            return False
+        MessageBox.information(
+            self.computationVariableGui, 'Variable Calculation in Progress',
+            f'A variable is being calculated in the background.\nPlease wait before {action}.')
+        return True
+
+    def _variableComputationStateChanged(self, running):
+        """Finish a deferred host-window close only after worker cleanup."""
+        if not running and self._closing_after_variable_compute:
+            QTimer.singleShot(0, self.close)
 
     def clickCloseEvent(self):
         self.close()
@@ -1200,6 +1229,14 @@ drag the variable back to the variable list.
             return None
 
     def computationVariable(self):
+        if self.model_fit_running:
+            self._showModelFitBusyMessage('computing a variable')
+            return
+        if self._variableCalculationBusy('starting another calculation'):
+            return
+        if self.readMatThreads:
+            MessageBox.information(self, 'Data Import in Progress', 'Please wait for data import to finish.')
+            return
         self.computationVariableGui.updateData(self.data)
         self.computationVariableGui.show()
 
@@ -1229,6 +1266,8 @@ drag the variable back to the variable list.
 
     # 保存预设的.psydata文件
     def saveFilteredData(self):
+        if self._variableCalculationBusy('exporting filtered data'):
+            return False
         filtered_copy = self.getFilteredDataFrame(record_script=True)
 
         try:

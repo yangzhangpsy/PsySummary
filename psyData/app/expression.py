@@ -158,6 +158,9 @@ def validate_variable_name(name, data_frame):
     name = name.strip()
     if not name or any(ord(character) < 32 for character in name):
         raise ValueError('Enter a non-empty target variable name without control characters.')
+    if '@' in name or ':' in name:
+        raise ValueError('The target variable name cannot contain "@" or ":"; '
+                         'these characters are reserved for aggregation and filter rules.')
     if any(str(column).strip() == name for column in data_frame.columns):
         raise ValueError(f'The target variable {name!r} already exists. Choose a different name.')
     return name
@@ -185,28 +188,68 @@ def validate_result(result, data_frame):
     return column
 
 
+def _input_missing_mask(node, data_frame):
+    """Track source missingness in row order, selecting only active where branches."""
+    empty = np.zeros(len(data_frame), dtype=bool)
+    if isinstance(node, ast.Subscript):
+        root = node
+        while isinstance(root, ast.Subscript):
+            root = root.value
+        if _attribute_chain(root) == 'self.data':
+            # Read only original data here, including scalar selections and slices.
+            source = evaluate_expression(ast.unparse(node), data_frame)
+            missing = np.asarray(pd.isna(source), dtype=bool)
+            try:
+                return np.broadcast_to(missing, empty.shape)
+            except ValueError:
+                # Uncertain alignment must not suppress a missing-result warning.
+                return empty
+        # A slice of a computed result can reorder rows; do not assume alignment.
+        return empty
+    if isinstance(node, (ast.List, ast.Tuple)):
+        if len(node.elts) not in (1, len(data_frame)):
+            return empty
+        missing = np.array([_input_missing_mask(child, data_frame)[index]
+                            for index, child in enumerate(node.elts)], dtype=bool)
+        return np.broadcast_to(missing, empty.shape)
+    if isinstance(node, ast.Call) and _attribute_chain(node.func) == 'np.where':
+        condition = evaluate_expression(ast.unparse(node.args[0]), data_frame)
+        try:
+            condition = np.broadcast_to(np.asarray(condition, dtype=bool), empty.shape)
+        except ValueError:
+            return empty
+        return np.where(condition, _input_missing_mask(node.args[1], data_frame),
+                        _input_missing_mask(node.args[2], data_frame))
+    for child in ast.iter_child_nodes(node):
+        empty |= _input_missing_mask(child, data_frame)
+    return empty
+
+
 def result_warning(column, expression, data_frame):
     """Describe newly missing values and infinities without warning for missing-input propagation."""
-    input_missing = np.zeros(len(data_frame), dtype=bool)
-    for node in ast.walk(_parse_expression(expression)):
-        if (isinstance(node, ast.Subscript) and _attribute_chain(node.value) == 'self.data'
-                and isinstance(node.slice, ast.Constant) and node.slice.value in data_frame.columns):
-            source_missing = data_frame[node.slice.value].isna()
-            if isinstance(source_missing, pd.DataFrame):
-                source_missing = source_missing.any(axis=1)
-            input_missing |= source_missing.to_numpy(dtype=bool)
     missing = column.isna().to_numpy(dtype=bool)
+    input_missing = (_input_missing_mask(_parse_expression(expression).body, data_frame)
+                     if missing.any() else np.zeros(len(data_frame), dtype=bool))
     new_missing = int(np.count_nonzero(missing & ~input_missing))
-    if pd.api.types.is_numeric_dtype(column.dtype):
-        values = column.to_numpy(dtype=complex, na_value=np.nan)
-        infinite = int(np.count_nonzero(np.isinf(values)))
+    if pd.api.types.is_integer_dtype(column.dtype) or pd.api.types.is_bool_dtype(column.dtype):
+        infinite = 0
+    elif pd.api.types.is_numeric_dtype(column.dtype):
+        # Bound temporary storage; real columns never need a whole complex copy.
+        dtype = complex if pd.api.types.is_complex_dtype(column.dtype) else float
+        infinite = 0
+        for start in range(0, len(column), 65536):
+            chunk = column.iloc[start:start + 65536]
+            # Preserve an infinite component even when the other component is NaN.
+            values = (chunk.to_numpy(dtype=dtype) if dtype is complex
+                      else chunk.to_numpy(dtype=dtype, na_value=np.nan))
+            infinite += int(np.count_nonzero(np.isinf(values)))
     else:
         infinite = sum(isinstance(value, (float, complex, np.floating, np.complexfloating))
                        and np.isinf(value) for value in column)
     if not new_missing and not infinite:
         return ''
     return (f'The result contains {new_missing} newly missing value(s) and '
-            f'{infinite} infinite value(s). Missing values on rows with missing inputs '
+            f'{infinite} infinite value(s). Missing values propagated from selected inputs '
             f'are not counted as newly missing. Check the input values and expression.')
 
 
@@ -216,4 +259,5 @@ def prepare_variable(name, expression, data_frame):
     normalized = to_aggregate_expression(expression)
     with np.errstate(divide='ignore', invalid='ignore', over='ignore'):
         column = validate_result(evaluate_expression(normalized, data_frame), data_frame)
-    return name, column, normalized, result_warning(column, normalized, data_frame)
+        warning = result_warning(column, normalized, data_frame)
+    return name, column, normalized, warning

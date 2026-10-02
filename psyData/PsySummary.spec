@@ -12,6 +12,7 @@ a = Analysis(
         # Script export needs source files, not just bundled PYZ bytecode.
         (str(root / 'app' / 'cognitiveModels.py'), 'app'),
         (str(root / 'app' / 'cognitiveModelSpec.py'), 'app'),
+        (str(root / 'app' / 'expression.py'), 'app'),
     ],
     hiddenimports=['matplotlib.backends.backend_qt5agg'],
     hookspath=[], runtime_hooks=[], excludes=['PyQt6', 'PySide6', 'PySide2'],

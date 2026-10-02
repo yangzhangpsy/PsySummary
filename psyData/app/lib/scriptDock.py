@@ -3,6 +3,7 @@ import keyword
 import os
 import re
 import shutil
+import sys
 import tempfile
 
 from PyQt5.QtCore import QRegularExpression, Qt, pyqtSignal
@@ -14,13 +15,28 @@ from app.lib import DockWidget
 
 INITIAL_SCRIPT = 'from aggregateData import AggregateData\naggData = AggregateData()'
 
+# Also protect transitive numerical/data dependencies from local-module shadowing.
+RESERVED_SCRIPT_MODULES = frozenset(name.casefold() for name in (
+    set(getattr(sys, 'stdlib_module_names', sys.builtin_module_names))
+    | {'csv', 'math', 'os', 're', 'json', 'typing', 'threading', 'warnings',
+       'numpy', 'pandas', 'scipy', 'mat73', 'h5py', 'dateutil', 'pytz',
+       'tzdata', 'six', 'packaging', 'matplotlib', 'PIL', 'cycler',
+       'kiwisolver', 'pyparsing', 'contourpy', 'fontTools', 'app', 'fitCancellation'}
+))
+
 
 def export_analysis_bundle(script_path, script_text, helper_sources):
     """Stage a complete export and restore prior files if publication fails."""
     script_path = os.path.abspath(script_path)
     directory, script_name = os.path.split(script_path)
-    if script_name.casefold() in {name.casefold() for name in helper_sources}:
+    # Windows treats trailing dots/spaces as aliases of the same filename.
+    portable_name = script_name.rstrip(' .')
+    if portable_name.casefold() in {name.casefold() for name in helper_sources}:
         raise ValueError('Choose a script filename different from the exported helper modules.')
+    module_name = os.path.splitext(portable_name)[0].casefold()
+    if module_name in RESERVED_SCRIPT_MODULES:
+        raise ValueError(f'The script filename {script_name!r} conflicts with a Python '
+                         'or analysis dependency module. Choose another name, such as analysis.py.')
     names = list(helper_sources) + [script_name]
     for name in names:
         destination = os.path.join(directory, name)

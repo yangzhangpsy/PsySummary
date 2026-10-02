@@ -1,10 +1,10 @@
 import sys
 import numpy as np
 import pandas as pd
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (QLabel, QLineEdit, QPushButton, QApplication, QListWidget,
                              QGridLayout, QHBoxLayout, QWidget, QListWidgetItem, QSizePolicy,
-                             QMessageBox)
+                             QMessageBox, QProgressBar)
 from app.psyDataFunc import PsyDataFunc as Func
 from app.lib import MessageBox
 
@@ -12,6 +12,7 @@ from app.lib.list_widget import ListWidget
 from app.psyDataFunc import PsyDataFunc
 from app.expression import (
     EXPRESSION_HELP, prepare_variable, evaluate_expression, to_aggregate_expression, runBoxcox,
+    validate_variable_name,
 )
 
 
@@ -51,11 +52,44 @@ def convertExpressionToAggregateData(expression):
     return to_aggregate_expression(expression)
 
 
+class VariableComputeThread(QThread):
+    """Calculate one read-only expression without accessing Qt widgets or logs."""
+
+    def __init__(self, name, expression, data_frame, parent=None):
+        super().__init__(parent)
+        self.name = name
+        self.expression = expression
+        self.data_frame = data_frame
+        self.result = None
+        self.error = ''
+
+    def run(self):
+        """Prepare a result for the GUI; cancellation never commits partial data."""
+        try:
+            if not self.isInterruptionRequested():
+                result = prepare_variable(self.name, self.expression, self.data_frame)
+                if not self.isInterruptionRequested():
+                    self.result = result
+        except Exception as error:
+            self.error = str(error)
+        finally:
+            self.data_frame = None
+
+
 class VariableCompute(QWidget):
     transformFinished = pyqtSignal(str)
+    computationRunningChanged = pyqtSignal(bool)
+    computationFinished = pyqtSignal()
 
-    def __init__(self, dataFrame: pd.DataFrame = None):
-        super(VariableCompute, self).__init__()
+    def __init__(self, dataFrame: pd.DataFrame = None, parent=None):
+        super(VariableCompute, self).__init__(parent, Qt.Window)
+        self.setWindowModality(Qt.WindowModal)
+        self.computation_running = False
+        self._computation_thread = None
+        self._computation_source = None
+        self._cancel_requested = False
+        self._close_after_computation = False
+        self._enabled_before_computation = []
 
         self.variable_list = None
         self.target_input = None
@@ -67,6 +101,7 @@ class VariableCompute(QWidget):
         self.setWindowIcon(Func.getImageObject("icon.png", type=1))
         # self.setGeometry(100, 100, 800, 600)
         self.initUI()
+        QApplication.instance().aboutToQuit.connect(self._finishBeforeApplicationQuit)
 
     def initUI(self):
         # Main container widget
@@ -130,6 +165,7 @@ class VariableCompute(QWidget):
         ok_button = QPushButton('OK')
         reset_button = QPushButton('Reset')
         cancel_button = QPushButton('Cancel')
+        self.cancel_button = cancel_button
 
         ok_button.clicked.connect(self.on_ok_button_click)
         reset_button.clicked.connect(self.on_reset_button_click)
@@ -152,6 +188,15 @@ class VariableCompute(QWidget):
         main_layout.addWidget(self.variable_list, 1, 0, 5, 1)
         main_layout.addLayout(operators_layout, 1, 1, 3, 2)
         main_layout.addLayout(button_layout, 7, 0, 1, 4)
+        self.computation_status = QLabel('Computing variable…')
+        self.computation_progress = QProgressBar()
+        self.computation_progress.setRange(0, 0)
+        self.computation_progress.setTextVisible(False)
+        self.computation_progress.setFixedHeight(5)
+        main_layout.addWidget(self.computation_status, 8, 0, 1, 5)
+        main_layout.addWidget(self.computation_progress, 9, 0, 1, 5)
+        self.computation_status.hide()
+        self.computation_progress.hide()
 
         # Setting layout to main widget
         self.setLayout(main_layout)
@@ -163,6 +208,8 @@ class VariableCompute(QWidget):
         self.numeric_expression.setAcceptDrops(True)
 
     def updateData(self, dataFrame):
+        if self.computation_running:
+            raise RuntimeError('Wait for the current variable calculation before replacing its data.')
         self.dataFrame = dataFrame
         self.variables = self.dataFrame.columns.tolist()
 
@@ -242,13 +289,74 @@ class VariableCompute(QWidget):
         self.numeric_expression.clear()
 
     def on_ok_button_click(self):
-        """Commit one validated variable and its script before announcing success."""
+        """Validate the draft and start a worker without blocking the Qt event loop."""
+        if self.computation_running:
+            return
+        host = self.parentWidget()
+        if host is not None and getattr(host, 'model_fit_running', False):
+            MessageBox.information(self, 'Model Fitting in Progress',
+                                   'Please wait for model fitting to finish before computing a variable.')
+            return
         try:
-            name, column, source, warning = prepare_variable(
-                self.target_input.text(), self.numeric_expression.text(), self.dataFrame)
+            name = validate_variable_name(self.target_input.text(), self.dataFrame)
+            source = to_aggregate_expression(self.numeric_expression.text())
+            self._computation_source = self.dataFrame
+            self._cancel_requested = False
+            self._close_after_computation = False
+            thread = VariableComputeThread(name, source, self.dataFrame, self)
+            self._computation_thread = thread
+            thread.finished.connect(self._finishComputation)
+            self._setComputationRunning(True)
+            thread.start()
+        except Exception as error:
+            self._computation_thread = None
+            self._computation_source = None
+            self._setComputationRunning(False)
+            MessageBox.information(self, 'Compute Variable Error', str(error), QMessageBox.Close)
+
+    def _setComputationRunning(self, running):
+        """Freeze edit controls but keep cancellation and ordinary repainting active."""
+        self.computation_running = running
+        if running:
+            self._enabled_before_computation = [
+                (widget, widget.isEnabled()) for widget in self.findChildren(QWidget)
+                if isinstance(widget, (QPushButton, QLineEdit, QListWidget)) and widget is not self.cancel_button]
+            for widget, _enabled in self._enabled_before_computation:
+                widget.setEnabled(False)
+            self.computation_status.setText('Computing variable…')
+        else:
+            for widget, enabled in self._enabled_before_computation:
+                widget.setEnabled(enabled)
+            self._enabled_before_computation = []
+            self.cancel_button.setEnabled(True)
+        self.computation_status.setVisible(running)
+        self.computation_progress.setVisible(running)
+        self.computationRunningChanged.emit(running)
+
+    def _finishComputation(self):
+        """Commit only a finished, current result on the GUI thread, then release it."""
+        thread = self._computation_thread
+        if thread is None:
+            return
+        successful = False
+        try:
+            if self._cancel_requested:
+                return
+            if thread.error:
+                raise ValueError(thread.error)
+            if thread.result is None:
+                return
+            host = self.parentWidget()
+            if (self.dataFrame is not self._computation_source
+                    or (host is not None and getattr(host, 'data', self.dataFrame) is not self.dataFrame)):
+                raise ValueError('The input data changed during calculation. Reopen Compute Variable and try again.')
+            name, column, source, warning = thread.result
+            validate_variable_name(name, self.dataFrame)
             if warning and MessageBox.warning(
                     self, 'Non-finite Result', warning + '\n\nCreate this variable anyway?',
                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
+            if self._cancel_requested:
                 return
             acknowledgement = ', allow_nonfinite=True' if warning else ''
             script = f'aggData.calculateVariable({name!r}, {source!r}{acknowledgement})'
@@ -263,13 +371,64 @@ class VariableCompute(QWidget):
             self.variables.append(name)
             self.variable_list.addItem(item)
             self.target_input.setText(name)
+            successful = True
+            self.transformFinished.emit(name)
         except Exception as error:
             MessageBox.information(self, 'Compute Variable Error', str(error), QMessageBox.Close)
+        finally:
+            thread.result = None
+            self._computation_thread = None
+            self._computation_source = None
+            thread.deleteLater()
+            self._setComputationRunning(False)
+            if successful or self._close_after_computation:
+                self.close()
+            self.computationFinished.emit()
+
+    def requestCancelAndClose(self, close_parent=False):
+        """Confirm discarding a running result and defer closure until thread cleanup."""
+        if not self.computation_running or self._close_after_computation:
+            return True
+        destination = 'Data Summary' if close_parent else 'this window'
+        answer = MessageBox.question(
+            self, 'Variable Calculation in Progress',
+            'A variable is being calculated in the background.\n'
+            f'Discard its result and close {destination} after the calculation finishes?',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return False
+        self._close_after_computation = True
+        self._cancelComputation()
+        return True
+
+    def _cancelComputation(self):
+        """Request cancellation without terminating an active numerical operation."""
+        self._cancel_requested = True
+        if self._computation_thread is not None:
+            self._computation_thread.requestInterruption()
+        self.computation_status.setText('Cancelling; waiting for calculation to finish…')
+        self.cancel_button.setEnabled(False)
+
+    def closeEvent(self, event):
+        """Keep the worker owner alive until an active calculation has ended."""
+        if self.computation_running:
+            self.requestCancelAndClose()
+            event.ignore()
             return
-        self.transformFinished.emit(name)
-        self.close()
+        super().closeEvent(event)
+
+    def _finishBeforeApplicationQuit(self):
+        """Wait only on final application exit so Qt never destroys a running thread."""
+        if self._computation_thread is not None:
+            self._cancel_requested = True
+            self._computation_thread.requestInterruption()
+            self._computation_thread.wait()
 
     def on_cancel_button_click(self):
+        if self.computation_running:
+            self._close_after_computation = True
+            self._cancelComputation()
+            return
         self.close()
 
     def on_delete_button_click(self):
