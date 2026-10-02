@@ -12,5 +12,18 @@ Like PsyBuilder, these scripts call PyInstaller directly using the local `.spec`
 files, then run DropDMG, Inno Setup or `dpkg-deb`. Temporary build output stays in
 `build`/`dist`; timestamped release files go into the parent directory of `psyData`.
 No additional Python build framework, automatic package installation or `sudo`
-is involved. macOS signing/notarization and real-platform installer testing remain
-separate release steps.
+is involved. Real-platform installer testing remains a separate release step.
+
+## Optional macOS signing
+
+Without a signing identity, the default build uses PyInstaller's ad-hoc signing.
+To use a certificate, specify its full name from the current keychain:
+
+```sh
+PSYSUMMARY_CODESIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)' ./makeRunMacNew
+```
+
+Like PsyBuilder, signed builds use `entitlements.plist`. The script checks the
+identity before building and verifies the resulting app signature before creating
+the DMG. Signing or verification failure stops the release. This does not perform
+Apple notarization; notarization and Gatekeeper testing remain separate steps.

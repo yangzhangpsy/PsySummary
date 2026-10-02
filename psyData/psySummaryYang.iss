@@ -3,7 +3,7 @@
 
 #define MyAppName "PsySummary"
 #define MyAppVersion "0.1"
-#define MyAppPublisher "Perception and Attention Lab (Yang Zhang)"
+#define MyAppPublisher "Attention and Perception lab"
 #define MyAppURL "https://www.psybuilder.com"
 #define MyAppExeName "PsySummary.exe"
 
@@ -20,19 +20,14 @@ AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
-; "ArchitecturesAllowed=x64compatible" specifies that Setup cannot run
-; on anything but x64 and Windows 11 on Arm.
 ArchitecturesAllowed=x64compatible
-; "ArchitecturesInstallIn64BitMode=x64compatible" requests that the
-; install be done in "64-bit mode" on x64 or Windows 11 on Arm,
-; meaning it should use the native 64-bit Program Files directory and
-; the 64-bit view of the registry.
 ArchitecturesInstallIn64BitMode=x64compatible
 DisableProgramGroupPage=yes
+; The [Icons] "quicklaunchicon" entry uses {userappdata} but its [Tasks] entry has a proper IsAdminInstallMode Check.
+UsedUserAreasWarning=no
 LicenseFile={#SourcePath}\license.txt
 ; Uncomment the following line to run in non administrative install mode (install for current user only.)
 PrivilegesRequired=lowest
-;PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=..
 OutputBaseFilename=PsySummary
 SetupIconFile={#SourcePath}\app\images\psybuilder.ico
@@ -55,8 +50,6 @@ Source: "{#SourcePath}\dist\PsySummary\*"; DestDir: "{app}"; Flags: ignoreversio
 ; Replace the previous PyInstaller dependencies before installing the new bundle.
 ; Otherwise, removed packages can survive upgrades inside _internal.
 Type: filesandordirs; Name: "{app}\_internal"
-
-; Do not register file associations until the GUI handles file-open arguments.
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

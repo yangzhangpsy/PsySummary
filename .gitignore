@@ -1,1 +1,12 @@
 .DS_Store
+.idea/
+
+# PyInstaller build output
+/psyData/build/
+/psyData/dist/
+
+# Generated installers and release archives
+/PsySummary*.exe
+/PsySummary*.zip
+/PsySummary*.dmg
+/PsySummary*.deb

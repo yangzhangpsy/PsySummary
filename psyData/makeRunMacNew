@@ -1,0 +1,56 @@
+#!/bin/sh
+# Build directly with PyInstaller and the existing DropDMG configuration.
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$SCRIPT_DIR"
+
+[ "$(uname -s)" = Darwin ] || { echo "Run this script on macOS." >&2; exit 1; }
+command -v pyinstaller >/dev/null
+command -v dropdmg >/dev/null
+
+CODESIGN_IDENTITY=${PSYSUMMARY_CODESIGN_IDENTITY:-}
+if [ -n "$CODESIGN_IDENTITY" ]; then
+    command -v security >/dev/null
+    command -v codesign >/dev/null
+    if ! security find-identity -v -p codesigning 2>/dev/null |
+        grep -Fq "\"$CODESIGN_IDENTITY\""; then
+        echo "Code-signing identity is not valid in the current keychain: $CODESIGN_IDENTITY" >&2
+        exit 1
+    fi
+    if [ ! -f "$SCRIPT_DIR/entitlements.plist" ]; then
+        echo "Entitlements file not found: $SCRIPT_DIR/entitlements.plist" >&2
+        exit 1
+    fi
+    export PYINSTALLER_STRICT_BUNDLE_CODESIGN_ERROR=1
+    echo "Using code-signing identity: $CODESIGN_IDENTITY"
+else
+    echo "No PSYSUMMARY_CODESIGN_IDENTITY set; PyInstaller will use ad-hoc signing."
+fi
+
+case "$(uname -m)" in
+    arm64) SUFFIX=MacSilicon ;;
+    x86_64) SUFFIX=Intel ;;
+    *) echo "Unsupported macOS architecture." >&2; exit 1 ;;
+esac
+
+RELEASE_NAME="PsySummary$(date +%Y%m%d%H%M%S)$SUFFIX"
+[ ! -e "$SCRIPT_DIR/../$RELEASE_NAME.dmg" ] || { echo "Release already exists." >&2; exit 1; }
+export PYINSTALLER_CONFIG_DIR="$SCRIPT_DIR/build/pyinstaller-config"
+
+echo "Building PsySummary.app..."
+pyinstaller --clean --noconfirm PsySummarySP.spec
+[ -x dist/PsySummary.app/Contents/MacOS/PsySummary ]
+
+if [ -n "$CODESIGN_IDENTITY" ]; then
+    echo "Verifying the signed application bundle..."
+    if ! codesign --verify --deep --strict --verbose=2 "$SCRIPT_DIR/dist/PsySummary.app"; then
+        echo "Code-signature verification failed; the DMG will not be generated." >&2
+        exit 1
+    fi
+fi
+
+echo "Creating DMG..."
+dropdmg --config-name psySummary --destination "$SCRIPT_DIR/.." \
+    --base-name "$RELEASE_NAME" "$SCRIPT_DIR/dist/PsySummary.app"
+[ -s "$SCRIPT_DIR/../$RELEASE_NAME.dmg" ]
+echo "Created: $SCRIPT_DIR/../$RELEASE_NAME.dmg"

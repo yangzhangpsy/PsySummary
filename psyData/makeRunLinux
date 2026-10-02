@@ -1,0 +1,35 @@
+#!/bin/sh
+# Build directly with PyInstaller, then package the bundle as a Debian package.
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$SCRIPT_DIR"
+
+[ "$(uname -s)" = Linux ] || { echo "Run this script on Linux." >&2; exit 1; }
+command -v pyinstaller >/dev/null
+command -v dpkg-deb >/dev/null
+ARCH=$(dpkg --print-architecture)
+RELEASE_FILE="$SCRIPT_DIR/../PsySummary$(date +%Y%m%d%H%M%S)${ARCH}.deb"
+[ ! -e "$RELEASE_FILE" ] || { echo "Release already exists." >&2; exit 1; }
+export PYINSTALLER_CONFIG_DIR="$SCRIPT_DIR/build/pyinstaller-config"
+
+echo "Building PsySummary..."
+pyinstaller --clean --noconfirm PsySummary.spec
+[ -x dist/PsySummary/PsySummary ]
+
+PACKAGE_DIR=$(mktemp -d "$SCRIPT_DIR/build/psysummary-deb.XXXXXX")
+mkdir -p "$PACKAGE_DIR/DEBIAN" "$PACKAGE_DIR/opt/psysummary" \
+    "$PACKAGE_DIR/usr/bin" "$PACKAGE_DIR/usr/share/applications" \
+    "$PACKAGE_DIR/usr/share/pixmaps"
+cp -a dist/PsySummary/. "$PACKAGE_DIR/opt/psysummary/"
+cp app/images/icon.png "$PACKAGE_DIR/usr/share/pixmaps/psysummary.png"
+printf '#!/bin/sh\nexec /opt/psysummary/PsySummary "$@"\n' > "$PACKAGE_DIR/usr/bin/PsySummary"
+chmod 755 "$PACKAGE_DIR/usr/bin/PsySummary"
+printf '[Desktop Entry]\nType=Application\nName=PsySummary\nExec=PsySummary\nIcon=psysummary\nTerminal=false\nCategories=Education;Science;\n' \
+    > "$PACKAGE_DIR/usr/share/applications/psysummary.desktop"
+printf 'Package: psysummary\nVersion: 0.1\nSection: science\nPriority: optional\nArchitecture: %s\nMaintainer: Yang Zhang <yzhangpsy@suda.edu.cn>\nDepends: libc6, libglib2.0-0, libx11-6, libxcb1, libxkbcommon0, libxkbcommon-x11-0\nDescription: Reaction time preprocessing and data summary\n' "$ARCH" \
+    > "$PACKAGE_DIR/DEBIAN/control"
+chmod 755 "$PACKAGE_DIR" "$PACKAGE_DIR/DEBIAN"
+chmod 644 "$PACKAGE_DIR/DEBIAN/control"
+dpkg-deb --root-owner-group --build "$PACKAGE_DIR" "$RELEASE_FILE"
+[ -s "$RELEASE_FILE" ]
+echo "Created: $RELEASE_FILE"
