@@ -55,7 +55,8 @@ class Output(DockWidget):
         :return:
         """
         if showTime:
-            self.text_edit.append(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.text_edit.append(f"<p>{timestamp}</p>")
 
         information = re.sub(r'\n', '<br>', information)
         # none
