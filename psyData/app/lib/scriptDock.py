@@ -217,7 +217,7 @@ class OutputTextEdit(QTextEdit):
                 source_directory = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                 sources = {name: os.path.join(source_directory, 'exportFiles', name)
                            for name in ('aggregateData.py', 'rtDist.py')}
-                for helper_name in ('cognitiveModels.py', 'cognitiveModelSpec.py', 'expression.py'):
+                for helper_name in ('cognitiveModels.py', 'cognitiveModelSpec.py', 'expression.py', 'dataPreparation.py'):
                     sources[helper_name] = os.path.join(source_directory, helper_name)
                 warning = export_analysis_bundle(export_full_filename, self.toPlainText(), sources)
                 if warning:

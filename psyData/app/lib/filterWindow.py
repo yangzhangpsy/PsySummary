@@ -1,4 +1,5 @@
 import pandas as pd
+from app.dataPreparation import format_checklist_rule
 
 from PyQt5.QtCore import QRegExp, Qt, QAbstractListModel, QModelIndex, QVariant, QSortFilterProxyModel, pyqtSignal
 from PyQt5.QtGui import QColor, QPalette, QRegExpValidator
@@ -630,16 +631,9 @@ in the view/analysis/summary procedure.""")
     # checklist确认事件
     def addCheckListEvent(self):
         chooses = self.getChoose()
-        text = self.selected_var_name
-        text += ":"
-        # 拼接所有多选框选中的值
-        if self.isVariableNumeric:
-            all_values_Str = "".join(f" = {v}" for v in chooses)
-        else:
-            all_values_Str = "".join(f" = '{v}'" for v in chooses)
-
-        self.filter_list.addItem(text + all_values_Str)
-        self.mainFilterList.addItem(text + all_values_Str)
+        rule = format_checklist_rule(self.selected_var_name, chooses, self.isVariableNumeric)
+        self.filter_list.addItem(rule)
+        self.mainFilterList.addItem(rule)
         self.clearCheckedBox()
 
     def clearCheckedBox(self):

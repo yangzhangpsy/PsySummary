@@ -20,12 +20,12 @@ except ImportError:  # Standalone PsySummary analysis-script export.
 try:
     from app.cognitiveModelSpec import (
         ACCURACY_CODING, LBA_MODEL, RATCLIFF_MODEL, RESPONSE_CODING, RDM_MODEL,
-        validate_model_data,
+        model_response_mapping, response_value_token, validate_model_data,
     )
 except ImportError:  # Standalone PsySummary analysis-script export.
     from cognitiveModelSpec import (
         ACCURACY_CODING, LBA_MODEL, RATCLIFF_MODEL, RESPONSE_CODING, RDM_MODEL,
-        validate_model_data,
+        model_response_mapping, response_value_token, validate_model_data,
     )
 
 
@@ -535,7 +535,8 @@ def _fit_response_model(dataframe, specification, cancel_check=None):
         rt_values = rt_values / 1000.0
     response_values = specification['response_values']
     response_mapping = specification['response_mapping']
-    mapped_responses = responses.map(lambda value: response_mapping.get(str(value))).to_numpy()
+    typed_mapping = model_response_mapping(specification)
+    mapped_responses = responses.map(lambda value: typed_mapping.get(response_value_token(value))).to_numpy()
     valid_response = pd.notna(mapped_responses)
     rt_values = rt_values[valid_response]
     mapped_responses = mapped_responses[valid_response]

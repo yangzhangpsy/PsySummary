@@ -150,6 +150,10 @@ class PsyData(QMainWindow):
         # self.plugin_mode = not __name__ == "__main__"
         self.plugin_mode = False
         self.readMatThreads = dict()
+        self._mat_import_results = {}
+        self._mat_import_job_id = 0
+        self._mat_import_append = False
+        QApplication.instance().aboutToQuit.connect(self._shutdownDataImports)
         self.pivotTableWindow = None
         self._pending_result_widget = None
         self._model_fit_message_box = None
@@ -467,6 +471,9 @@ drag the variable back to the variable list.
         """Open one or more supported data files through the normal import workflow."""
         if self._variableCalculationBusy('loading data'):
             return False
+        if self.model_fit_running:
+            self._showModelFitBusyMessage()
+            return False
         files = self.normalizeRecentFilePaths(files)
         if not files:
             return
@@ -476,7 +483,7 @@ drag the variable back to the variable list.
             file_extension = file_extension.lower()
 
             if file_extension in {'.txt', '.dat', '.csv'}:
-                self.import_file = DecodingFiles(files, add_source_file=True)
+                self.import_file = DecodingFiles(files, add_source_file=True, parent=self)
                 self.import_file.ok_btn.clicked.connect(self.decodingFileOKPressedEvent)
                 self.import_file.finalDataReady.connect(self.decodingFileDataReady)
                 self.import_file.show()
@@ -578,34 +585,77 @@ drag the variable back to the variable list.
             self.readMatFilesThread(fileList)
 
     def readMatFilesThread(self, fileList: list, matType: int = 1, appendDataModel: bool = False):
-        readMatThread = ImportMatThread(fileList, matType, appendDataModel)
-        self.readMatThreads.update({matType: readMatThread})
-
-        readMatThread.readStatus.connect(self.handleThreadSignal)
-        readMatThread.finished.connect(self.handleReadDataFinished)
-        readMatThread.start()
+        """Start an owned, uniquely identified import job in the current batch."""
+        if not self.readMatThreads:
+            self._mat_import_results = {}
+            self._mat_import_append = appendDataModel
+        self._mat_import_job_id += 1
+        worker = ImportMatThread(fileList, matType, appendDataModel, self)
+        worker.job_id = self._mat_import_job_id
+        self.readMatThreads[worker.job_id] = worker
+        worker.readStatus.connect(self.handleThreadSignal)
+        worker.dataReady.connect(self.handleReadDataFinished)
+        worker.finished.connect(self._finishMatImport)
+        worker.start()
 
     def handleReadDataFinished(self, data: pd.DataFrame, fileType: int, fileList: list, appendDataModel: bool):
-        # Use DataFrame.append for potentially better performance in some cases
-        if data.size > 0:
-            if not self.dataReadStart:
-                self.data = pd.DataFrame()
-                self.dataReadStart = True
+        """Stage successful data; native thread completion owns cleanup and commit."""
+        worker = self.sender()
+        if worker is not None and data.size > 0:
+            self._mat_import_results[worker.job_id] = (data, fileType, list(fileList))
 
-            self.data = pd.concat([self.data, data], ignore_index=True)
-            self.updateRecentFiles(fileList)
-
-        self.readMatThreads[fileType].wait()
-        PsyDataFunc.genScript(PsyDataFunc.list2Script(fileList, 'fileList'))
-        if fileType == 1:
-            PsyDataFunc.genScript(f"aggData.readMatlabFiles(fileList, {appendDataModel})")
-        else:
-            PsyDataFunc.genScript(f"aggData.readMatlabFiles73(fileList, {appendDataModel})")
-
-        self.readMatThreads.pop(fileType)
-
-        if not self.readMatThreads:
+    def _finishMatImport(self):
+        """Release every completed job, including failures, and commit a finished batch."""
+        worker = self.sender()
+        if worker is None:
+            return
+        self.readMatThreads.pop(worker.job_id, None)
+        worker.deleteLater()
+        if self.readMatThreads:
+            return
+        results = [self._mat_import_results[key] for key in sorted(self._mat_import_results)]
+        self._mat_import_results = {}
+        if not results or self._closing:
+            return
+        previous_data = self.data
+        previous_script = self.script_dock.text_edit.toPlainText()
+        try:
+            frames = ([self.data] if self._mat_import_append else []) + [row[0] for row in results]
+            combined = pd.concat(frames, ignore_index=True)
+            # Record the same stable order used for the GUI, not thread finish order.
+            for index, (_data, file_type, files) in enumerate(results):
+                PsyDataFunc.genScript(PsyDataFunc.list2Script(files, 'fileList'))
+                method = 'readMatlabFiles' if file_type == 1 else 'readMatlabFiles73'
+                append = self._mat_import_append or index > 0
+                PsyDataFunc.genScript(f"aggData.{method}(fileList, {append})")
+            self.data = combined
             self.clearAllListAndSetData()
+            self.updateRecentFiles([path for row in results for path in row[2]])
+        except Exception as error:
+            self.data = previous_data
+            self.script_dock.text_edit.setPlainText(previous_script)
+            self.printLogInfo(f'MAT import failed: {error}', 2)
+
+    def _dataImportBusy(self):
+        """Keep source-dependent actions blocked until import cleanup has completed."""
+        if self.readMatThreads or getattr(self.import_file, 'final_read_thread', None) is not None:
+            MessageBox.information(self, 'Data Import in Progress', 'Please wait for data import to finish.')
+            return True
+        return False
+
+    def _shutdownDataImports(self):
+        """Wait for owned import threads only during final application shutdown."""
+        self._closing = True
+        workers = list(self.readMatThreads.values())
+        for worker in workers:
+            worker.requestInterruption()
+        for worker in workers:
+            worker.wait()
+        delimited = getattr(self.import_file, 'final_read_thread', None)
+        if delimited is not None:
+            delimited.requestInterruption()
+            delimited.quit()
+            delimited.wait()
 
     def decodingFileOKPressedEvent(self):
         self.import_file.readFinalData()
@@ -617,11 +667,13 @@ drag the variable back to the variable list.
             self.printLogInfo(f"Reading file: {file_path}", 0)
         self.updateRecentFiles(self.import_file.files)
         self.import_file.acceptEvent()
-        self.clearAllListAndSetData()
 
         text_format, delimiter = self.import_file.getFormatAndDelimiter()
         PsyDataFunc.genScript(PsyDataFunc.list2Script(self.import_file.files, 'fileList'))
-        PsyDataFunc.genScript(f"aggData.readDatFiles(fileList, {self.import_file.getContainHeadStatus()},'{text_format}', '{delimiter}')")
+        PsyDataFunc.genScript(
+            f"aggData.readDatFiles(fileList, {self.import_file.getContainHeadStatus()}, "
+            f"{text_format!r}, {delimiter!r})")
+        self.clearAllListAndSetData()
 
     def clearAllListAndSetData(self):
         if self.data is None:
@@ -630,7 +682,7 @@ drag the variable back to the variable list.
         self.dataReadStart = False
         self.clearAllList()
 
-        if not validateName(self.data):
+        if not validateName(self.data) or not self.data.columns.is_unique:
             self.cleanColumnNames()
             MessageBox.information(self, 'Warning', "At least one of the variable names is illegal.")
 
@@ -656,6 +708,8 @@ drag the variable back to the variable list.
 
         # 重命名 DataFrame 列
         self.data.columns = cleaned_columns
+        # The exported importer reads the original headers; replay the GUI's exact rename.
+        PsyDataFunc.genScript(f"aggData.data.columns = {cleaned_columns!r}")
         return None
 
     def clearAllList(self):
@@ -715,6 +769,8 @@ drag the variable back to the variable list.
 
     # 显示打开文件的table
     def showDataTable(self):
+        if self._dataImportBusy():
+            return False
         try:
             if self.data is None:
                 MessageBox.information(self, 'Warning', "No data exist, please load the data first.")
@@ -1098,6 +1154,9 @@ drag the variable back to the variable list.
         self._syncAggregationResultsControls()
 
     def closeEvent(self, event):
+        if self._dataImportBusy():
+            event.ignore()
+            return
         if self.computationVariableGui.computation_running:
             if self.computationVariableGui.requestCancelAndClose(close_parent=True):
                 self._closing_after_variable_compute = True
@@ -1158,7 +1217,9 @@ drag the variable back to the variable list.
         self.variables_list.sortItems(Qt.AscendingOrder)
 
     def _variableCalculationBusy(self, action):
-        """Prevent source-data changes or competing analyses during a calculation."""
+        """Prevent competing source-data operations during import or calculation."""
+        if self._dataImportBusy():
+            return True
         if not self.computationVariableGui.computation_running:
             return False
         MessageBox.information(
@@ -1195,6 +1256,8 @@ drag the variable back to the variable list.
         settings.sync()
 
     def loadFilterEvent(self):
+        if self._dataImportBusy():
+            return False
         try:
             file_path, _ = QFileDialog.getOpenFileName(
                 self, 'Load Setup', self._setupDirectory(),
@@ -1307,7 +1370,9 @@ drag the variable back to the variable list.
                 # 将数组数据保存到文件中
                 self.data.to_csv(file_path, sep='|', quoting=csv.QUOTE_NONNUMERIC, index=False, header=True)
 
-                PsyDataFunc.genScript(f"aggData.data.to_csv('{file_path}', sep='|', quoting=csv.QUOTE_NONNUMERIC, index=False, header=True)")
+                PsyDataFunc.genScript(
+                    f"aggData.data.to_csv({file_path!r}, sep='|', quoting=csv.QUOTE_NONNUMERIC, "
+                    f"index=False, header=True)")
         except Exception as e:
             self.printLogInfo(f"Error in saving file:{e}", 3)
             return None

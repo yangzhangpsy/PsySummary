@@ -48,11 +48,9 @@ class PsyDataFunc(object):
 
     @staticmethod
     def list2Script(var_list: list, var_list_name: str):
-        if len(var_list) > 0:
-            temp_script = '"' + '", "'.join(var_list) + '"'
-        else:
-            temp_script = ''
-        return f"{var_list_name} = [{temp_script}]"
+        """Serialize string lists without changing quotes, backslashes, or line breaks."""
+        values = [str(value) for value in var_list]
+        return f"{var_list_name} = {values!r}"
 
 
     @staticmethod

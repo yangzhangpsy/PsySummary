@@ -65,7 +65,7 @@ class ImportMatThread(QThread):
     #  3 compile error
     #  4 warning
     readStatus = pyqtSignal(int, str)
-    finished = pyqtSignal(pd.DataFrame, int, list, bool)  # Used for passing the loaded data
+    dataReady = pyqtSignal(pd.DataFrame, int, list, bool)
 
     #  0 1 2 for success, fail (has no allResults_APL variable within the mat file),
     def __init__(self, fileList, fileType=1, appendDataModel=False, parent=None):
@@ -76,24 +76,31 @@ class ImportMatThread(QThread):
             self.files = fileList
         self.type = fileType
         self.append_data_model = appendDataModel
+        self.loaded_files = []
 
     # def __del__(self):
     #     self.wait()
 
     def run(self):
+        """Read data; the native QThread.finished signal always handles job cleanup."""
         self.readData()
-        self.quit()
 
     def readData(self):
-
+        """Deliver only successfully loaded data without shadowing thread completion."""
         try:
+            if self.isInterruptionRequested():
+                return
             if self.type == 1:
                 df = self.readMatlabFiles()
             else:
                 df = self.readMatlabFiles73()
 
+            if self.isInterruptionRequested():
+                return
             if df.size > 0:
-                self.finished.emit(df, self.type, self.files, self.append_data_model)
+                self.dataReady.emit(df, self.type, self.loaded_files, self.append_data_model)
+            else:
+                self.readStatus.emit(2, 'No usable result rows were found in the selected MAT files.')
 
         except Exception as e:
             self.readStatus.emit(2, f"IOError: {e}")
@@ -106,6 +113,8 @@ class ImportMatThread(QThread):
         combined_df = pd.DataFrame()
 
         for file in self.files:
+            if self.isInterruptionRequested():
+                return pd.DataFrame()
             if file.endswith('.mat'):
                 try:
                     mat_data = loadmat(file)
@@ -155,6 +164,7 @@ class ImportMatThread(QThread):
                 data_frames, loaded_files, existing_source_columns=('filename',))
             combined_df = pd.concat(data_frames, ignore_index=True)
 
+        self.loaded_files = loaded_files
         return combined_df
 
     def readMatlabFiles73(self):
@@ -165,6 +175,8 @@ class ImportMatThread(QThread):
         combined_df = pd.DataFrame()
 
         for file in self.files:
+            if self.isInterruptionRequested():
+                return pd.DataFrame()
             if file.endswith('.mat'):
                 try:
                     mat_dat = mat73.loadmat(file)
@@ -191,4 +203,5 @@ class ImportMatThread(QThread):
                 data_frames, loaded_files, existing_source_columns=('filename',))
             combined_df = pd.concat(data_frames, ignore_index=True)
 
+        self.loaded_files = loaded_files
         return combined_df

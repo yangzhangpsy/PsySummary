@@ -173,10 +173,11 @@ class FitRTsDistThread(QThread):
         target_values = pd.to_numeric(self.dataFrame[self.independentVarName], errors='coerce')
         valid_mask = target_values.notna() & np.isfinite(target_values)
 
-        prepared_frame = self.dataFrame.loc[valid_mask, required_columns].copy()
-        prepared_frame[self.independentVarName] = target_values.loc[valid_mask].to_numpy()
+        # Retain groups with zero valid RTs so they report N=0/Converged=No.
+        prepared_frame = self.dataFrame.loc[:, required_columns].copy()
+        prepared_frame[self.independentVarName] = target_values.where(valid_mask).to_numpy()
 
-        if prepared_frame.empty:
+        if not valid_mask.any():
             raise ValueError(
                 f"No valid numeric data remain in '{self.independentVarName}' after filtering.")
 

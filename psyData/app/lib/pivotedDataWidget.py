@@ -2,6 +2,7 @@ from PyQt5.QtCore import QTimer, pyqtSignal
 from PyQt5.QtWidgets import QVBoxLayout, QWidget, QLabel, QPushButton, QApplication, QFileDialog, QHBoxLayout, QSpinBox
 import pandas as pd
 import numpy as np
+from app.dataPreparation import prepare_summary_frame, safe_mode
 
 from app.psyDataFunc import PsyDataFunc as Func
 from app.lib.fitRTsDistThread import FitRTsDistThread
@@ -31,7 +32,8 @@ MODEL_FIT_METHODS = frozenset(RT_FIT_METHODS + tuple(COGNITIVE_MODEL_NAMES))
 
 
 def getStandardError(x):
-    return np.std(x, ddof=1) / np.sqrt(len(x))
+    """Calculate sample standard error using only non-missing observations."""
+    return pd.Series(x).sem(ddof=1)
 
 
 def groupby_to_pivot_tables(grouped_result, index_var=None, columns_var=None):
@@ -250,12 +252,6 @@ class PivotedDataWidget(QWidget):
                 PsyDataFunc.printOut(empty_filter_message, 4)
                 raise ValueError(empty_filter_message)
 
-            for target_var in target_vars:
-                target_var_name, _operation, _specification = split_target(target_var)
-                if not pd.api.types.is_numeric_dtype(self._tmp_dataframe[target_var_name]):
-                    self._tmp_dataframe[target_var_name] = pd.to_numeric(
-                        self._tmp_dataframe[target_var_name], errors='coerce')
-
             generateScript(row_vars, col_vars, target_vars, self.ruleList)
             if self._fit_target_count:
                 QTimer.singleShot(0, self._processNextTarget)
@@ -291,13 +287,13 @@ class PivotedDataWidget(QWidget):
 
     def _calculateSummaryResult(self, target_var_name, operation):
         """Calculate one non-model summary on the prepared filtered data."""
-        dataframe = self._tmp_dataframe
+        dataframe = prepare_summary_frame(self._tmp_dataframe, target_var_name, operation)
         if operation == 'Mean':
             aggregate = 'mean'
         elif operation == 'Median':
             aggregate = 'median'
         elif operation == 'Mode':
-            aggregate = lambda values: values.mode().iloc[0]
+            aggregate = safe_mode
         elif operation == 'Count':
             aggregate = 'count'
         elif operation == 'Standard Deviation':

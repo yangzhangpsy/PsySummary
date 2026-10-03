@@ -1,6 +1,9 @@
 import csv
 import os
 import re
+from app.dataPreparation import (
+    is_range_expression, parse_checklist_values, prepare_summary_frame, safe_mode, split_filter_rule,
+)
 from app.expression import prepare_variable, evaluate_expression, to_aggregate_expression, runBoxcox
 from operator import lt, le, ge, gt
 
@@ -75,8 +78,7 @@ def warnConditionWiseFiltering(row_var_list, column_var_list, data_frame, rule_l
 
 
 def isCompareCond(expression: str):
-    comparison_operators = {'<', '>', '<=', '>='}
-    return any(operator in expression for operator in comparison_operators)
+    return is_range_expression(expression)
 
 
 def executeDataFilter(dataFrame, variableName: str, compareType: str, value):
@@ -112,7 +114,8 @@ def evaluateCalculateExpression(expression, aggregate_data):
 
 
 def getStandardError(x):
-    return np.std(x, ddof=1) / np.sqrt(len(x))
+    """Calculate sample standard error using only non-missing observations."""
+    return pd.Series(x).sem(ddof=1)
 
 
 def getValueInExpression(expression: str):
@@ -197,8 +200,10 @@ def doFilterOutData(row_var_list: list, column_var_list: list, expression: str, 
                 mean = sumTable2DataFrame(row_var_list, column_var_list, median_table, dataFrame)
 
                 temp_var_name = columnName + '_temp_median_diff'
+                suffix = 1
                 while temp_var_name in dataFrame:
-                    temp_var_name = f"{columnName}_temp_median_diff_{int(np.random.rand(1) * 1000)}"
+                    temp_var_name = f"{columnName}_temp_median_diff_{suffix}"
+                    suffix += 1
 
                 # calculate the MAD b*median(abs(x - median(x)))
                 dataFrame[temp_var_name] = np.abs(dataFrame[columnName] - mean.iloc[:, 0])
@@ -210,7 +215,7 @@ def doFilterOutData(row_var_list: list, column_var_list: list, expression: str, 
                 sd = sumTable2DataFrame(row_var_list, column_var_list, median_table2, dataFrame)
                 sd *= 1.4826
                 # remove the temp_var (abs(x - median(x)))
-                dataFrame.drop(columns=[temp_var_name])
+                dataFrame.drop(columns=[temp_var_name], inplace=True)
 
             else:
                 mean = sumTable2DataFrame(row_var_list, column_var_list, mean_table, dataFrame)
@@ -244,8 +249,7 @@ def filterDataFunc(row_var_list, column_var_list, dataFrame, ruleList, omegaValu
     tmp_data_frame = dataFrame.copy()
 
     for index, rule in enumerate(ruleList):
-        variable_name, conditional_expression = rule.split(':')
-        variable_name = variable_name.strip()
+        variable_name, conditional_expression = split_filter_rule(rule)
         # 区分range规则和checklist规则
         if isCompareCond(conditional_expression):
             if not pd.api.types.is_numeric_dtype(tmp_data_frame[variable_name]):
@@ -280,17 +284,14 @@ def filterDataFunc(row_var_list, column_var_list, dataFrame, ruleList, omegaValu
             if 0 < omegaValues[index] < 1:
                 tmp_data_frame = CDF_pooling_main(tmp_data_frame, row_var_list, column_var_list, variable_name)
 
-                filtered_df = tmp_data_frame[tmp_data_frame[f"{variable_name}_cdf"] > omegaValues[index]]
+                # Match the GUI: retain CDF values at or below the slow-tail cutoff.
+                filtered_df = tmp_data_frame[tmp_data_frame[f"{variable_name}_cdf"] <= omegaValues[index]]
                 tmp_data_frame = filtered_df
             else:
                 print(f"Skip 'Pool CDF' as the ω is out of the range [0, 1], and no changes will be made to the data.")
         else:
             # checkList rules
-            data = conditional_expression.split('=')
-            data = [numStr.strip() for numStr in data]
-            data = data[1:]
-            # a possible bug here, double check later
-            data = [numStr[1:-1] if "'" in numStr else float(numStr) for numStr in data]
+            data = parse_checklist_values(conditional_expression)
             filtered_df = tmp_data_frame[tmp_data_frame[variable_name].isin(data)]
             tmp_data_frame = filtered_df
 
@@ -588,7 +589,7 @@ class AggregateData(object):
         data_frames, _source_column = addSourceFileColumn(
             data_frames, loaded_files, existing_source_columns=('filename',))
         if appendDataModel:
-            data_frames.append(self.data)
+            data_frames.insert(0, self.data)
 
             # Concatenate all DataFrames at once for efficiency
         self.data = pd.concat(data_frames, ignore_index=True)
@@ -612,7 +613,7 @@ class AggregateData(object):
         data_frames, _source_column = addSourceFileColumn(
             data_frames, loaded_files, existing_source_columns=('filename',))
         if appendDataModel:
-            data_frames.append(self.data)
+            data_frames.insert(0, self.data)
         self.data = pd.concat(data_frames, ignore_index=True)
 
     def calculateVariable(self, target_variable_name, calculate_expression, allow_nonfinite=False):
@@ -637,17 +638,14 @@ class AggregateData(object):
         self.resultList = []
         warnConditionWiseFiltering(row_vars, col_vars, self.data, ruleList)
 
-        for target_var in target_vars:
-            target_var_name, operation, _specification = split_target(target_var)
-            if not pd.api.types.is_numeric_dtype(self.data[target_var_name]):
-                self.data[target_var_name] = pd.to_numeric(self.data[target_var_name], errors='coerce')
-
-        tmpDataFrame = filterDataFunc(row_vars, col_vars, self.data, ruleList, omegaValues)
+        # Match the GUI: filter raw values before preparing each individual target.
+        filteredFrame = filterDataFunc(row_vars, col_vars, self.data, ruleList, omegaValues)
 
         result_frame_var_names = []
 
         for target_var in target_vars:
             target_var_name, operation, specification = split_target(target_var)
+            tmpDataFrame = prepare_summary_frame(filteredFrame, target_var_name, operation)
 
             result = None
 
@@ -666,10 +664,10 @@ class AggregateData(object):
                                             aggfunc='median')
             elif operation == 'Mode':
                 if len(row_vars) == 0 and len(col_vars) == 0:
-                    result = tmpDataFrame[target_var_name].mode().iloc[0]
+                    result = safe_mode(tmpDataFrame[target_var_name])
                 else:
                     result = pd.pivot_table(tmpDataFrame, index=row_vars, columns=col_vars, values=target_var_name,
-                                            aggfunc=lambda x: x.mode().iloc[0])
+                                            aggfunc=safe_mode)
             elif operation == 'Count':
                 if len(row_vars) == 0 and len(col_vars) == 0:
                     result = tmpDataFrame[target_var_name].count()
@@ -702,7 +700,7 @@ class AggregateData(object):
                                             aggfunc='var')
             elif operation == 'Standard Error':
                 if len(row_vars) == 0 and len(col_vars) == 0:
-                    result = tmpDataFrame[target_var_name].sem()
+                    result = getStandardError(tmpDataFrame[target_var_name])
                 else:
                     result = pd.pivot_table(tmpDataFrame, index=row_vars, columns=col_vars, values=target_var_name,
                                             aggfunc=getStandardError)

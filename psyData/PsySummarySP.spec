@@ -20,6 +20,7 @@ a = Analysis(
         (str(root / 'app' / 'cognitiveModels.py'), 'app'),
         (str(root / 'app' / 'cognitiveModelSpec.py'), 'app'),
         (str(root / 'app' / 'expression.py'), 'app'),
+        (str(root / 'app' / 'dataPreparation.py'), 'app'),
     ],
     hiddenimports=['matplotlib.backends.backend_qt5agg'],
     hookspath=[], runtime_hooks=[],

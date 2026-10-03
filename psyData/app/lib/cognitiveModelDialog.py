@@ -14,7 +14,8 @@ from PyQt5.QtWidgets import (
 from app.cognitiveModelSpec import (
     ACCURACY_CODING, BOUNDARY_CODING_LABELS, LBA_MODEL, RATCLIFF_MODEL,
     RESPONSE_CODING, RDM_MODEL, default_parameters,
-    make_model_specification, parameter_tooltip, validate_model_specification,
+    make_model_specification, model_response_mapping, parameter_tooltip, response_value_token,
+    validate_model_specification,
 )
 
 
@@ -278,18 +279,21 @@ class CognitiveModelDialog(QDialog):
                 current_values = list(pd.unique(self.dataframe[response_variable].dropna()))
             else:
                 current_values = []
-            current_by_key = {str(value): value for value in current_values}
-            saved_keys = [str(value) for value in saved_response_values]
+            current_by_key = {response_value_token(value): value for value in current_values}
+            saved_keys = [response_value_token(value) for value in saved_response_values]
             response_values = [
                 current_by_key[key] for key in saved_keys if key in current_by_key
             ]
             response_values.extend(
-                value for value in current_values if str(value) not in saved_keys)
+                value for value in current_values if response_value_token(value) not in saved_keys)
             response_set_unchanged = (
                 len(saved_response_values) == len(response_values)
-                and set(saved_keys) == {str(value) for value in response_values}
+                and set(saved_keys) == {response_value_token(value) for value in response_values}
             )
-            mapping = dict(specification.get('response_mapping', {}))
+            saved_mapping = model_response_mapping(specification)
+            mapping = {str(value): saved_mapping[response_value_token(value)]
+                       for value in response_values
+                       if saved_mapping.get(response_value_token(value)) is not None}
             old_indices = {}
             if not response_set_unchanged and self.model != RATCLIFF_MODEL:
                 for index, value in enumerate(response_values, 1):

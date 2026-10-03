@@ -84,8 +84,8 @@ class FinalDataReadWorker(QObject):
 class DecodingFiles(Dialog):
     finalDataReady = pyqtSignal(object)
 
-    def __init__(self, files=None, add_source_file=False):
-        super().__init__()
+    def __init__(self, files=None, add_source_file=False, parent=None):
+        super().__init__(parent)
         if files is None:
             files = []
 

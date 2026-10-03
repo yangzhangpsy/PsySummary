@@ -2,6 +2,8 @@
 
 from copy import deepcopy
 import math
+from decimal import Decimal
+from numbers import Real
 
 import numpy as np
 import pandas as pd
@@ -259,7 +261,9 @@ def validate_model_specification(specification, available_variables=None):
     if model in (LBA_MODEL, RDM_MODEL) and len(response_values) < 2:
         raise ValueError(f'{model} requires at least two response values.')
     response_mapping = specification.get('response_mapping') or {}
-    if set(response_mapping) != {str(value) for value in response_values}:
+    if len({response_value_token(value) for value in response_values}) != len(response_values):
+        raise ValueError('Configured response values must be distinct.')
+    if len(response_mapping) != len(response_values) or set(response_mapping) != {str(value) for value in response_values}:
         raise ValueError('Every observed response value must have a model-response mapping.')
     mapped_values = list(response_mapping.values())
     if model == RATCLIFF_MODEL and sorted(mapped_values) != ['lower', 'upper']:
@@ -322,6 +326,22 @@ def validate_model_specification(specification, available_variables=None):
     return specification
 
 
+def response_value_token(value):
+    """Compare numeric responses by value without converting text responses to numbers."""
+    if hasattr(value, 'item'):
+        value = value.item()
+    if isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value):
+        return ('number', Decimal(str(value)))
+    return ('text', str(value)) if isinstance(value, str) else ('other', str(value))
+
+
+def model_response_mapping(specification):
+    """Resolve saved string keys through their typed, configured response values."""
+    mapping = specification.get('response_mapping', {})
+    return {response_value_token(value): mapping.get(str(value))
+            for value in specification.get('response_values', [])}
+
+
 def validate_model_data(specification, dataframe, group_vars=()):
     """Validate a saved model against current filtered data before any fitting starts."""
     model = specification.get('model')
@@ -335,8 +355,8 @@ def validate_model_data(specification, dataframe, group_vars=()):
                 'Use Define Filters to retain the intended two responses, then reopen Model Settings '
                 'and map one to lower and the other to upper.')
     validate_model_specification(specification, dataframe.columns)
-    configured = {str(value) for value in specification['response_values']}
-    actual = {str(value) for value in observed}
+    configured = {response_value_token(value) for value in specification['response_values']}
+    actual = {response_value_token(value) for value in observed}
     if actual != configured:
         raise ValueError(
             f"Response Variable '{variable}' no longer matches the saved response mapping. "
@@ -350,7 +370,7 @@ def validate_model_data(specification, dataframe, group_vars=()):
         label = ', '.join(f'{name}={value}' for name, value in zip(group_vars, keys)) or 'Overall'
         rt = pd.to_numeric(frame[specification['rt_variable']], errors='coerce')
         valid = np.isfinite(rt) & frame[variable].notna()
-        present = {str(value) for value in frame.loc[valid, variable]}
+        present = {response_value_token(value) for value in frame.loc[valid, variable]}
         if not present:
             raise ValueError(
                 f"Group [{label}]: no valid RT/response pairs remain after filtering. "
