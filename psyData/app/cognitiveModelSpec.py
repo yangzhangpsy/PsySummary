@@ -400,6 +400,25 @@ def validate_model_data(specification, dataframe, group_vars=()):
                     'RT/response pair. Recode or exclude invalid rows in Filter Data before running.')
 
 
+class ValidatedModelData:
+    """Keep a run-local validation receipt for one read-only frame and model configuration."""
+
+    def __init__(self, specification, dataframe, group_vars=()):
+        validate_model_data(specification, dataframe, group_vars)
+        self._dataframe = dataframe
+        self._shape = dataframe.shape
+        self._columns = tuple(dataframe.columns)
+        self._specification = deepcopy(specification)
+        self._group_vars = tuple(group_vars)
+
+    def matches(self, specification, dataframe, group_vars=()):
+        """Reuse validation only for the exact prepared frame and unchanged configuration."""
+        return (dataframe is self._dataframe and dataframe.shape == self._shape
+                and tuple(dataframe.columns) == self._columns
+                and tuple(group_vars) == self._group_vars
+                and specification == self._specification)
+
+
 def model_result_parameters(specification):
     """Return the one shared parameter set reported for either boundary coding."""
     return specification['parameters']

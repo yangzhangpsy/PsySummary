@@ -17,7 +17,7 @@ def prepare_summary_frame(frame, variable, operation):
 
 def safe_mode(values):
     """Return the first mode, or a missing result when no non-missing values exist."""
-    modes = values.mode()
+    modes = values.mode(dropna=True)
     return np.nan if modes.empty else modes.iloc[0]
 
 

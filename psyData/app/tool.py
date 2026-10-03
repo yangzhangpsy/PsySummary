@@ -155,25 +155,24 @@ def getValueInExpression(expression: str):
 
 def doFilterOutData(row_var_list: list, column_var_list: list, expression: str, dataFrame, columnName: str):
     compareTypeStr = expression[:2].strip()
-    nz = None
+    multiplier = None
 
     if 'Shifting Z' in expression or 'SD' in expression or 'MAD' in expression:
-        # the cutoff value type is a shifting z or specific times of sd
+        # Estimate the center and scale appropriate to the selected rule.
         if len(row_var_list) == 0 and len(column_var_list) == 0:
+            values = dataFrame[columnName]
             if 'MAD' in expression:
-                # here mean actually is median
-                mean = dataFrame[columnName].median()
-                # the magic num 1.4826 come from Rousseeuw & Croux, 1993, see detail in Leys JESP, 2013,764-766
-                # here sd actually is MAD
-                sd = 1.4826 * (np.median(np.abs(dataFrame[columnName] - mean)))
+                center = values.median(skipna=True)
+                # Normal-consistent MAD (Rousseeuw & Croux, 1993; Leys et al., 2013).
+                scale = 1.4826 * (values - center).abs().median(skipna=True)
             else:
-                mean = dataFrame[columnName].mean()
-                sd = dataFrame[columnName].std()
+                center = values.mean(skipna=True)
+                scale = values.std(skipna=True, ddof=1)
 
             if 'Shifting Z' in expression:
-                nz = StatisticTool.singleShiftZs(dataFrame.shape[0])
+                multiplier = StatisticTool.singleShiftZs(values.count())
             elif 'SD' in expression or 'MAD' in expression:
-                nz = getValueInExpression(expression)
+                multiplier = getValueInExpression(expression)
         else:
             mean_table = pd.pivot_table(dataFrame, index=row_var_list, columns=column_var_list, values=columnName)
             std_table = pd.pivot_table(dataFrame, index=row_var_list, columns=column_var_list, values=columnName,
@@ -181,8 +180,7 @@ def doFilterOutData(row_var_list: list, column_var_list: list, expression: str, 
             if 'MAD' in expression:
                 median_table = pd.pivot_table(dataFrame, index=row_var_list, columns=column_var_list, values=columnName,
                                               aggfunc='median')
-                # fake mean, which is actually the median
-                mean = sumTable2DataFrame(row_var_list, column_var_list, median_table, dataFrame)
+                center = sumTable2DataFrame(row_var_list, column_var_list, median_table, dataFrame)
 
                 temp_var_name = columnName + '_temp_median_diff'
                 suffix = 1
@@ -191,32 +189,32 @@ def doFilterOutData(row_var_list: list, column_var_list: list, expression: str, 
                     suffix += 1
 
                 # calculate the MAD b*median(abs(x - median(x)))
-                dataFrame[temp_var_name] = np.abs(dataFrame[columnName] - mean.iloc[:, 0])
+                dataFrame[temp_var_name] = (dataFrame[columnName] - center.iloc[:, 0]).abs()
 
                 median_table2 = pd.pivot_table(dataFrame, index=row_var_list, columns=column_var_list,
                                                values=temp_var_name,
                                                aggfunc='median')
 
-                sd = sumTable2DataFrame(row_var_list, column_var_list, median_table2, dataFrame)
-                sd *= 1.4826
+                scale = sumTable2DataFrame(row_var_list, column_var_list, median_table2, dataFrame)
+                scale *= 1.4826
                 # remove the temp_var (abs(x - median(x)))
                 dataFrame.drop(columns=[temp_var_name], inplace=True)
 
             else:
-                mean = sumTable2DataFrame(row_var_list, column_var_list, mean_table, dataFrame)
-                sd = sumTable2DataFrame(row_var_list, column_var_list, std_table, dataFrame)
+                center = sumTable2DataFrame(row_var_list, column_var_list, mean_table, dataFrame)
+                scale = sumTable2DataFrame(row_var_list, column_var_list, std_table, dataFrame)
 
             if 'Shifting Z' in expression:
                 count_table = pd.pivot_table(dataFrame, index=row_var_list, columns=column_var_list, values=columnName,
                                              aggfunc='count')
-                nz = sumTable2DataFrame(row_var_list, column_var_list, count_table, dataFrame, True)
+                multiplier = sumTable2DataFrame(row_var_list, column_var_list, count_table, dataFrame, True)
             elif 'SD' in expression or 'MAD' in expression:
-                nz = getValueInExpression(expression)
+                multiplier = getValueInExpression(expression)
 
         if compareTypeStr == '>' or compareTypeStr == '>=':
-            cutoff_Value = mean - nz * sd
+            cutoff_Value = center - multiplier * scale
         else:
-            cutoff_Value = mean + nz * sd
+            cutoff_Value = center + multiplier * scale
 
     else:
         # the cutoff value type is a raw number
@@ -299,7 +297,7 @@ class StatisticTool:
 
     @staticmethod
     def filterData(row_var_list, column_var_list, dataFrame, ruleList,
-                   record_script=True):
+                   record_script=True, script_collector=None):
         StatisticTool.checkEmptyNullValue(dataFrame, row_var_list, column_var_list)
 
         tmp_data_frame = dataFrame.copy()
@@ -379,8 +377,11 @@ class StatisticTool:
                 tmp_data_frame = filtered_df
 
         if record_script:
-            PsyDataFunc.genScript(
-                f'cdfPoolingOmegas = [{be_printed_omega_str[:-2]}]')
+            script_line = f'cdfPoolingOmegas = [{be_printed_omega_str[:-2]}]'
+            if script_collector is not None:
+                script_collector.append(script_line)
+            else:
+                PsyDataFunc.genScript(script_line)
 
         return tmp_data_frame
 

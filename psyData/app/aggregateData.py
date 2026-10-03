@@ -115,7 +115,7 @@ def evaluateCalculateExpression(expression, aggregate_data):
 
 def getStandardError(x):
     """Calculate sample standard error using only non-missing observations."""
-    return pd.Series(x).sem(ddof=1)
+    return pd.Series(x).sem(skipna=True, ddof=1)
 
 
 def getValueInExpression(expression: str):
@@ -171,24 +171,24 @@ def sumTable2DataFrame(row_var_list: list, column_var_list: list, sumTable, data
 
 def doFilterOutData(row_var_list: list, column_var_list: list, expression: str, dataFrame, columnName: str):
     compareTypeStr = expression[:2].strip()
-    nz = None
+    multiplier = None
 
     if 'Shifting Z' in expression or 'SD' in expression or 'MAD' in expression:
-        # the cutoff value type is a shifting z or specific times of sd
+        # Estimate the center and scale appropriate to the selected rule.
         if len(row_var_list) == 0 and len(column_var_list) == 0:
+            values = dataFrame[columnName]
             if 'MAD' in expression:
-                # here mean actually is median
-                mean = dataFrame[columnName].median()
-                # here sd actually is MAD
-                sd = 1.4826 * (np.median(np.abs(dataFrame[columnName] - mean)))
+                center = values.median(skipna=True)
+                # Normal-consistent MAD (Rousseeuw & Croux, 1993; Leys et al., 2013).
+                scale = 1.4826 * (values - center).abs().median(skipna=True)
             else:
-                mean = dataFrame[columnName].mean()
-                sd = dataFrame[columnName].std()
+                center = values.mean(skipna=True)
+                scale = values.std(skipna=True, ddof=1)
 
             if 'Shifting Z' in expression:
-                nz = singleShiftZs(dataFrame.shape[0])
+                multiplier = singleShiftZs(values.count())
             elif 'SD' in expression or 'MAD' in expression:
-                nz = getValueInExpression(expression)
+                multiplier = getValueInExpression(expression)
         else:
             mean_table = pd.pivot_table(dataFrame, index=row_var_list, columns=column_var_list, values=columnName)
             std_table = pd.pivot_table(dataFrame, index=row_var_list, columns=column_var_list, values=columnName,
@@ -196,8 +196,7 @@ def doFilterOutData(row_var_list: list, column_var_list: list, expression: str, 
             if 'MAD' in expression:
                 median_table = pd.pivot_table(dataFrame, index=row_var_list, columns=column_var_list, values=columnName,
                                               aggfunc='median')
-                # fake mean, which is actually the median
-                mean = sumTable2DataFrame(row_var_list, column_var_list, median_table, dataFrame)
+                center = sumTable2DataFrame(row_var_list, column_var_list, median_table, dataFrame)
 
                 temp_var_name = columnName + '_temp_median_diff'
                 suffix = 1
@@ -206,32 +205,32 @@ def doFilterOutData(row_var_list: list, column_var_list: list, expression: str, 
                     suffix += 1
 
                 # calculate the MAD b*median(abs(x - median(x)))
-                dataFrame[temp_var_name] = np.abs(dataFrame[columnName] - mean.iloc[:, 0])
+                dataFrame[temp_var_name] = (dataFrame[columnName] - center.iloc[:, 0]).abs()
 
                 median_table2 = pd.pivot_table(dataFrame, index=row_var_list, columns=column_var_list,
                                                values=temp_var_name,
                                                aggfunc='median')
 
-                sd = sumTable2DataFrame(row_var_list, column_var_list, median_table2, dataFrame)
-                sd *= 1.4826
+                scale = sumTable2DataFrame(row_var_list, column_var_list, median_table2, dataFrame)
+                scale *= 1.4826
                 # remove the temp_var (abs(x - median(x)))
                 dataFrame.drop(columns=[temp_var_name], inplace=True)
 
             else:
-                mean = sumTable2DataFrame(row_var_list, column_var_list, mean_table, dataFrame)
-                sd = sumTable2DataFrame(row_var_list, column_var_list, std_table, dataFrame)
+                center = sumTable2DataFrame(row_var_list, column_var_list, mean_table, dataFrame)
+                scale = sumTable2DataFrame(row_var_list, column_var_list, std_table, dataFrame)
 
             if 'Shifting Z' in expression:
                 count_table = pd.pivot_table(dataFrame, index=row_var_list, columns=column_var_list, values=columnName,
                                              aggfunc='count')
-                nz = sumTable2DataFrame(row_var_list, column_var_list, count_table, dataFrame, True)
+                multiplier = sumTable2DataFrame(row_var_list, column_var_list, count_table, dataFrame, True)
             elif 'SD' in expression or 'MAD' in expression:
-                nz = getValueInExpression(expression)
+                multiplier = getValueInExpression(expression)
 
         if compareTypeStr == '>' or compareTypeStr == '>=':
-            cutoff_Value = mean - nz * sd
+            cutoff_Value = center - multiplier * scale
         else:
-            cutoff_Value = mean + nz * sd
+            cutoff_Value = center + multiplier * scale
 
     else:
         # the cutoff value type is a raw number
@@ -653,12 +652,12 @@ class AggregateData(object):
 
             if operation == 'Mean':
                 if len(row_vars) == 0 and len(col_vars) == 0:
-                    result = tmpDataFrame[target_var_name].mean()
+                    result = tmpDataFrame[target_var_name].mean(skipna=True)
                 else:
                     result = pd.pivot_table(tmpDataFrame, index=row_vars, columns=col_vars, values=target_var_name)
             elif operation == 'Median':
                 if len(row_vars) == 0 and len(col_vars) == 0:
-                    result = tmpDataFrame[target_var_name].median()
+                    result = tmpDataFrame[target_var_name].median(skipna=True)
                 else:
                     result = pd.pivot_table(tmpDataFrame, index=row_vars, columns=col_vars, values=target_var_name,
                                             aggfunc='median')
@@ -676,25 +675,25 @@ class AggregateData(object):
                                             aggfunc='count')
             elif operation == 'Standard Deviation':
                 if len(row_vars) == 0 and len(col_vars) == 0:
-                    result = tmpDataFrame[target_var_name].std()
+                    result = tmpDataFrame[target_var_name].std(skipna=True, ddof=1)
                 else:
                     result = pd.pivot_table(tmpDataFrame, index=row_vars, columns=col_vars, values=target_var_name,
                                             aggfunc='std')
             elif operation == 'Max':
                 if len(row_vars) == 0 and len(col_vars) == 0:
-                    result = tmpDataFrame[target_var_name].max()
+                    result = tmpDataFrame[target_var_name].max(skipna=True)
                 else:
                     result = pd.pivot_table(tmpDataFrame, index=row_vars, columns=col_vars, values=target_var_name,
                                             aggfunc='max')
             elif operation == 'Min':
                 if len(row_vars) == 0 and len(col_vars) == 0:
-                    result = tmpDataFrame[target_var_name].min()
+                    result = tmpDataFrame[target_var_name].min(skipna=True)
                 else:
                     result = pd.pivot_table(tmpDataFrame, index=row_vars, columns=col_vars, values=target_var_name,
                                             aggfunc='min')
             elif operation == 'Variance':
                 if len(row_vars) == 0 and len(col_vars) == 0:
-                    result = tmpDataFrame[target_var_name].var()
+                    result = tmpDataFrame[target_var_name].var(skipna=True, ddof=1)
                 else:
                     result = pd.pivot_table(tmpDataFrame, index=row_vars, columns=col_vars, values=target_var_name,
                                             aggfunc='var')

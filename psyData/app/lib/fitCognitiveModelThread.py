@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+from copy import deepcopy
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from app.cognitiveModels import fit_cognitive_model
@@ -9,6 +10,7 @@ from app.fitCancellation import FitCancelled, raise_if_fit_cancelled
 from app.cognitiveModelSpec import (
     ACCURACY_CODING, BOUNDARY_CODING_LABELS, RATCLIFF_MODEL, RESPONSE_CODING,
     cognitive_model_reference_text, validate_model_data, model_result_parameters,
+    ValidatedModelData,
 )
 
 
@@ -24,13 +26,15 @@ class FitCognitiveModelThread(QThread):
     finished = pyqtSignal(object, list, list, list, object)
     cancelled = pyqtSignal()
 
-    def __init__(self, dataframe, specification, row_vars, col_vars, parent=None):
+    def __init__(self, dataframe, specification, row_vars, col_vars, parent=None,
+                 validation_receipt=None):
         """Initialize the grouped cognitive-model worker."""
         super().__init__(parent)
         self.dataframe = dataframe
-        self.specification = specification
-        self.row_vars = row_vars
-        self.col_vars = col_vars
+        self.specification = deepcopy(specification)
+        self.row_vars = list(row_vars)
+        self.col_vars = list(col_vars)
+        self._validation_receipt = validation_receipt
 
     def run(self):
         """Fit all groups and emit result arrays plus diagnostics records."""
@@ -61,7 +65,9 @@ class FitCognitiveModelThread(QThread):
                 0, f'Coding scheme: {BOUNDARY_CODING_LABELS.get(coding, coding)}; '
                    f'response mapping={mapping}. {details}', False)
         group_vars = self.row_vars + self.col_vars
-        validate_model_data(specification, self.dataframe, group_vars)
+        if not (isinstance(self._validation_receipt, ValidatedModelData)
+                and self._validation_receipt.matches(specification, self.dataframe, group_vars)):
+            validate_model_data(specification, self.dataframe, group_vars)
         required = list(dict.fromkeys(
             group_vars + [specification['rt_variable'], specification['response_variable']]
             + ([specification['accuracy_variable']] if specification.get('accuracy_variable') else [])))

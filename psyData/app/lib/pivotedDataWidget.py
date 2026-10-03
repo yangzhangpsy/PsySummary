@@ -7,7 +7,9 @@ from app.dataPreparation import prepare_summary_frame, safe_mode
 from app.psyDataFunc import PsyDataFunc as Func
 from app.lib.fitRTsDistThread import FitRTsDistThread
 from app.lib.fitCognitiveModelThread import FitCognitiveModelThread
-from app.cognitiveModelSpec import COGNITIVE_MODEL_NAMES, split_target, resolve_analysis_seeds
+from app.cognitiveModelSpec import (
+    COGNITIVE_MODEL_NAMES, split_target, resolve_analysis_seeds, ValidatedModelData,
+)
 from app.psyDataFunc import PsyDataFunc
 from app.tool import StatisticTool, FlashMessageBox, warnConditionWiseFiltering
 from app.lib.dataFrameTableWidget import ResultFrameTableWidget
@@ -33,7 +35,7 @@ MODEL_FIT_METHODS = frozenset(RT_FIT_METHODS + tuple(COGNITIVE_MODEL_NAMES))
 
 def getStandardError(x):
     """Calculate sample standard error using only non-missing observations."""
-    return pd.Series(x).sem(ddof=1)
+    return pd.Series(x).sem(skipna=True, ddof=1)
 
 
 def groupby_to_pivot_tables(grouped_result, index_var=None, columns_var=None):
@@ -130,12 +132,62 @@ def checkVariablesDuplication(row_vars, col_vars, target_vars):
                 f'Please remove the multiple used variable(s) {duplicates} and retry!')
 
 
-def generateScript(row_vars, col_vars, target_vars, ruleList):
+class ModelPreparationError(ValueError):
+    """Report all invalid cognitive targets before starting the fitting queue."""
+
+
+class PreparedAnalysis:
+    """Own one run's filtered frame, resolved settings, and validation receipts."""
+
+    def __init__(self, dataframe, row_vars, col_vars, target_vars, rule_list):
+        self.source = dataframe
+        self.row_vars = list(row_vars)
+        self.col_vars = list(col_vars)
+        self.target_vars = resolve_analysis_seeds(target_vars)
+        self.rule_list = list(rule_list)
+        self.filter_script_lines = []
+        self.validation_receipts = {}
+        if self.rule_list:
+            self.dataframe = StatisticTool.filterData(
+                self.row_vars, self.col_vars, dataframe, self.rule_list,
+                record_script=True, script_collector=self.filter_script_lines)
+        else:
+            StatisticTool.checkEmptyNullValue(dataframe, self.row_vars, self.col_vars)
+            self.dataframe = dataframe
+            self.filter_script_lines.append('cdfPoolingOmegas = []')
+        if self.dataframe.empty:
+            message = 'No data remain after applying the current filters. Analysis was skipped.'
+            PsyDataFunc.printOut(message, 4)
+            raise ValueError(message)
+        problems = []
+        for index, target in enumerate(self.target_vars):
+            variable, model, specification = split_target(target)
+            if model not in COGNITIVE_MODEL_NAMES:
+                continue
+            try:
+                if not specification:
+                    raise ValueError('Open Model Settings to configure this model.')
+                self.validation_receipts[index] = ValidatedModelData(
+                    specification, self.dataframe, self.row_vars + self.col_vars)
+            except (TypeError, ValueError, KeyError) as error:
+                problems.append(f'{variable}@{model}:\n{error}')
+        if problems:
+            raise ModelPreparationError('\n\n'.join(problems))
+        checkVariablesDuplication(self.row_vars, self.col_vars, self.target_vars)
+
+    def matches(self, source, row_vars, col_vars, target_vars, rule_list):
+        """Reject preparation reuse for another source or a changed run configuration."""
+        return (source is self.source and list(row_vars) == self.row_vars
+                and list(col_vars) == self.col_vars and list(target_vars) == self.target_vars
+                and list(rule_list) == self.rule_list)
+
+
+def generateScript(row_vars, col_vars, target_vars, ruleList, filter_script_lines=()):
     if any(isinstance(target, dict) for target in target_vars):
         target_script = f'targetVariables = {target_vars!r}'
     else:
         target_script = PsyDataFunc.list2Script(target_vars, 'targetVariables')
-    analysis_script = [PsyDataFunc.list2Script(row_vars, 'rowVariables'),
+    analysis_script = list(filter_script_lines) + [PsyDataFunc.list2Script(row_vars, 'rowVariables'),
                        PsyDataFunc.list2Script(col_vars, 'colVariables'),
                        PsyDataFunc.list2Script(ruleList, 'ruleList'),
                        target_script,
@@ -154,14 +206,15 @@ class PivotedDataWidget(QWidget):
     analysisCancelled = pyqtSignal()
     analysisProgress = pyqtSignal(int, int, str)
 
-    def __init__(self, dataframe, row_vars, col_vars, target_vars, ruleList, parent=None):
+    def __init__(self, dataframe, row_vars, col_vars, target_vars, ruleList, parent=None,
+                 prepared_analysis=None):
         super(PivotedDataWidget, self).__init__(parent)
         self.fit_dist_thread = None
         self.table = None
         self.msg_box = None
         self.resultList = []
         self.filterStr = ''
-        self.ruleList = ruleList
+        self.ruleList = list(ruleList)
         self.result_frame_var_names = []
         self.fit_error_message = None
         self.fit_records = []
@@ -170,7 +223,13 @@ class PivotedDataWidget(QWidget):
         self.cognitiveFitMethods = list(COGNITIVE_MODEL_NAMES)
         self._row_vars = list(row_vars)
         self._col_vars = list(col_vars)
-        self._target_vars = resolve_analysis_seeds(target_vars)
+        if prepared_analysis is None:
+            prepared_analysis = PreparedAnalysis(dataframe, row_vars, col_vars, target_vars, ruleList)
+        elif not (isinstance(prepared_analysis, PreparedAnalysis)
+                  and prepared_analysis.matches(dataframe, row_vars, col_vars, target_vars, ruleList)):
+            raise ValueError('The prepared analysis does not match this data or configuration.')
+        self._prepared_analysis = prepared_analysis
+        self._target_vars = prepared_analysis.target_vars
         self._target_index = 0
         self._fit_started_count = 0
         self._fit_target_count = sum(
@@ -178,7 +237,7 @@ class PivotedDataWidget(QWidget):
         self._active_fit_label = None
         self._analysis_complete = False
         self._cancel_requested = False
-        self._tmp_dataframe = None
+        self._tmp_dataframe = prepared_analysis.dataframe
 
         self.initUI(dataframe, row_vars, col_vars, self._target_vars)
 
@@ -197,7 +256,8 @@ class PivotedDataWidget(QWidget):
     def fitCognitiveModelInBackground(self, dataFrame, specification, row_vars, col_vars):
         """Start one grouped cognitive-model fitting worker."""
         self.fit_dist_thread = FitCognitiveModelThread(
-            dataFrame, specification, row_vars, col_vars, parent=self)
+            dataFrame, specification, row_vars, col_vars, parent=self,
+            validation_receipt=self._prepared_analysis.validation_receipts.get(self._target_index))
         self.fit_dist_thread.fitStatus.connect(self.handleFitStatus)
         self.fit_dist_thread.finished.connect(self.handleFitFinished)
         self.fit_dist_thread.cancelled.connect(self.handleFitCancelled)
@@ -241,18 +301,9 @@ class PivotedDataWidget(QWidget):
         self.setLayout(self.all_layout)
 
         try:
-            checkVariablesDuplication(row_vars, col_vars, target_vars)
             warnConditionWiseFiltering(row_vars, col_vars, dataframe, self.ruleList)
-            self._tmp_dataframe = StatisticTool.filterData(
-                row_vars, col_vars, dataframe, self.ruleList,
-                record_script=True)
-
-            if self._tmp_dataframe.empty:
-                empty_filter_message = 'No data remain after applying the current filters. Analysis was skipped.'
-                PsyDataFunc.printOut(empty_filter_message, 4)
-                raise ValueError(empty_filter_message)
-
-            generateScript(row_vars, col_vars, target_vars, self.ruleList)
+            generateScript(row_vars, col_vars, target_vars, self.ruleList,
+                           self._prepared_analysis.filter_script_lines)
             if self._fit_target_count:
                 QTimer.singleShot(0, self._processNextTarget)
             else:
@@ -315,7 +366,10 @@ class PivotedDataWidget(QWidget):
                 return aggregate(series)
             if aggregate == 'count':
                 return series.count()
-            return getattr(series, aggregate)()
+            options = {'skipna': True}
+            if aggregate in {'std', 'var'}:
+                options['ddof'] = 1
+            return getattr(series, aggregate)(**options)
         return pd.pivot_table(
             dataframe, index=self._row_vars, columns=self._col_vars,
             values=target_var_name, aggfunc=aggregate)

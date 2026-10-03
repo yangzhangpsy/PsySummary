@@ -25,9 +25,12 @@ from app.lib.draggablelistwidget import DraggableListWidget, MainFilterListWidge
     VariableDraggableListWidget, MODEL_SPEC_ROLE
 from app.lib.filterWindow import FilterWindow
 from app.lib.dataFrameTableWidget import DataFrameTableWidget
+from app.lib.dataExportThread import DataExportThread
 from app.lib.distributionPreview import DistributionPreviewDialog
 from app.lib.modelFitOverlay import ModelFitOverlay
-from app.lib.pivotedDataWidget import MODEL_FIT_METHODS, PivotedDataWidget
+from app.lib.pivotedDataWidget import (
+    MODEL_FIT_METHODS, PivotedDataWidget, PreparedAnalysis, ModelPreparationError,
+)
 from app.psyDataFunc import PsyDataFunc
 from app.psyDataInfo import PsyDataInfo
 from app.lib.scriptDock import ScriptDock
@@ -35,7 +38,7 @@ from app.tool import StatisticTool, FlashMessageBox
 from app.variableCompute import VariableCompute
 from app.output import Output
 from app.cognitiveModelSpec import (
-    COGNITIVE_MODEL_NAMES, split_target, validate_model_data,
+    COGNITIVE_MODEL_NAMES, split_target,
 )
 
 
@@ -171,8 +174,11 @@ class PsyData(QMainWindow):
         self.data = pd.DataFrame()
         self.dataReadStart = False
         self.model_fit_running = False
+        self._analysis_preparing = False
         self._closing_after_model_cancel = False
         self._closing_after_variable_compute = False
+        self._data_export_thread = None
+        QApplication.instance().aboutToQuit.connect(self._shutdownDataExport)
         self._menu_enabled_before_model_fit = True
         self.is_windows = Info.OS_TYPE == 0
         self.files = None
@@ -439,6 +445,8 @@ drag the variable back to the variable list.
                 self.script_action.setChecked(self.script_dock.isVisible())
 
     def loadDataFile(self):
+        if self._dataExportBusy('loading data'):
+            return False
         options = QFileDialog.Options()
         # options |= QFileDialog.DontUseNativeDialog
 
@@ -867,6 +875,7 @@ drag the variable back to the variable list.
             return None
 
         try:
+            self._analysis_preparing = True
             rowList = getListWidgetData(self.rows_list)
             columnList = getListWidgetData(self.columns_list)
             dataList = getDataListEntries(self.data_list)
@@ -884,27 +893,14 @@ drag the variable back to the variable list.
                 split_target(target)[1] in MODEL_FIT_METHODS
                 for target in dataList)
 
-            model_targets = [split_target(target) for target in dataList
-                             if split_target(target)[1] in COGNITIVE_MODEL_NAMES]
-            if model_targets:
-                filtered = self.getFilteredDataFrame()
-                problems = []
-                for variable, model, specification in model_targets:
-                    try:
-                        if not specification:
-                            raise ValueError('Open Model Settings to configure this model.')
-                        validate_model_data(specification, filtered, rowList + columnList)
-                    except (TypeError, ValueError, KeyError) as error:
-                        problems.append(f'{variable}@{model}:\n{error}')
-                if problems:
-                    MessageBox.warning(self, 'Invalid Model Settings', '\n\n'.join(problems))
-                    return None
+            prepared = PreparedAnalysis(self.data, rowList, columnList, dataList, items)
 
             if contains_model_fit:
                 self.model_fit_running = True
                 self._startModelFitOverlay()
             result_widget = PivotedDataWidget(
-                self.data, rowList, columnList, dataList, items)
+                self.data, prepared.row_vars, prepared.col_vars, prepared.target_vars,
+                prepared.rule_list, prepared_analysis=prepared)
             if contains_model_fit:
                 self._pending_result_widget = result_widget
                 result_widget.analysisFinished.connect(
@@ -919,6 +915,9 @@ drag the variable back to the variable list.
                     result_widget.analysisProgress.connect(self._modelFitProgress)
             else:
                 self._showAggregationResults(result_widget)
+        except ModelPreparationError as error:
+            MessageBox.warning(self, 'Invalid Model Settings', str(error))
+            return None
         except Exception as e:
             self.model_fit_running = False
             self._pending_result_widget = None
@@ -926,6 +925,8 @@ drag the variable back to the variable list.
             MessageBox.information(self, 'Warning', f"{e}")
             traceback.print_exc()
             return None
+        finally:
+            self._analysis_preparing = False
 
     def _showModelFitBusyMessage(self, action='starting another analysis'):
         """Show the active-fit notice at a stable two-line width."""
@@ -1158,6 +1159,12 @@ drag the variable back to the variable list.
         self._syncAggregationResultsControls()
 
     def closeEvent(self, event):
+        if self._analysisPreparationBusy('closing PsySummary'):
+            event.ignore()
+            return
+        if self._dataExportBusy('closing PsySummary'):
+            event.ignore()
+            return
         if self._dataImportBusy():
             event.ignore()
             return
@@ -1222,6 +1229,10 @@ drag the variable back to the variable list.
 
     def _variableCalculationBusy(self, action):
         """Prevent competing source-data operations during import or calculation."""
+        if self._analysisPreparationBusy(action):
+            return True
+        if self._dataExportBusy(action):
+            return True
         if self._dataImportBusy():
             return True
         if not self.computationVariableGui.computation_running:
@@ -1229,6 +1240,15 @@ drag the variable back to the variable list.
         MessageBox.information(
             self.computationVariableGui, 'Variable Calculation in Progress',
             f'A variable is being calculated in the background.\nPlease wait before {action}.')
+        return True
+
+    def _analysisPreparationBusy(self, action):
+        """Prevent re-entry or source changes during modal filter confirmation."""
+        if not self._analysis_preparing:
+            return False
+        MessageBox.information(
+            self, 'Analysis Preparation in Progress',
+            f'Data are being prepared for analysis.\nPlease wait before {action}.')
         return True
 
     def _variableComputationStateChanged(self, running):
@@ -1315,7 +1335,7 @@ drag the variable back to the variable list.
             items.append(item.text())
         return items
 
-    def getFilteredDataFrame(self, record_script=False):
+    def getFilteredDataFrame(self, record_script=False, script_collector=None):
         """Return retained rows, optionally recording reusable filter parameters."""
         items = self.getFilterList()
 
@@ -1323,11 +1343,15 @@ drag the variable back to the variable list.
             rowList = getListWidgetData(self.rows_list)
             columnList = getListWidgetData(self.columns_list)
             # filterData owns the one defensive working copy needed to keep self.data unchanged.
-            return StatisticTool.filterData(
-                rowList, columnList, self.data, items,
-                record_script=record_script)
+            options = {'record_script': record_script}
+            if script_collector is not None:
+                options['script_collector'] = script_collector
+            return StatisticTool.filterData(rowList, columnList, self.data, items, **options)
         if record_script:
-            PsyDataFunc.genScript('cdfPoolingOmegas = []')
+            if script_collector is not None:
+                script_collector.append('cdfPoolingOmegas = []')
+            else:
+                PsyDataFunc.genScript('cdfPoolingOmegas = []')
         # Export and the read-only data viewer do not mutate the loaded DataFrame.
         return self.data
 
@@ -1335,8 +1359,12 @@ drag the variable back to the variable list.
     def saveFilteredData(self):
         if self._variableCalculationBusy('exporting filtered data'):
             return False
-        filtered_copy = self.getFilteredDataFrame(record_script=True)
-
+        if self.model_fit_running:
+            self._showModelFitBusyMessage('exporting filtered data')
+            return False
+        if self.data is None:
+            MessageBox.information(self, 'Warning', 'No data exist, please load data first.')
+            return False
         try:
             file_path, selected_filter = QFileDialog.getSaveFileName(
                 self,
@@ -1348,38 +1376,114 @@ drag the variable back to the variable list.
                 if extension not in {'.csv', '.psydata'}:
                     extension = '.psydata' if 'psyData' in selected_filter else '.csv'
                     file_path += extension
-
-                PsyDataFunc.genScript(f"filteredDataFrame = aggData.filterData(rowVariables, colVariables, ruleList, cdfPoolingOmegas)")
+                script_lines = [
+                    PsyDataFunc.list2Script(getListWidgetData(self.rows_list), 'rowVariables'),
+                    PsyDataFunc.list2Script(getListWidgetData(self.columns_list), 'colVariables'),
+                    PsyDataFunc.list2Script(self.getFilterList(), 'ruleList'),
+                ]
+                filtered_copy = self.getFilteredDataFrame(
+                    record_script=True, script_collector=script_lines)
+                script_lines.append(
+                    'filteredDataFrame = aggData.filterData(rowVariables, colVariables, ruleList, cdfPoolingOmegas)')
+                csv_options = {'index': False, 'header': True}
                 if extension == '.csv':
-                    filtered_copy.to_csv(file_path, index=False, header=True)
-                    PsyDataFunc.genScript(
+                    script_lines.append(
                         f"filteredDataFrame.to_csv({file_path!r}, index=False, header=True)")
                 else:
-                    filtered_copy.to_csv(
-                        file_path, sep='|', quoting=csv.QUOTE_NONNUMERIC, index=False, header=True)
-                    PsyDataFunc.genScript(
+                    csv_options.update(sep='|', quoting=csv.QUOTE_NONNUMERIC)
+                    script_lines.append(
                         f"filteredDataFrame.to_csv({file_path!r}, sep='|', quoting=csv.QUOTE_NONNUMERIC, "
                         f"index=False, header=True)")
+                return self._startDataExport(filtered_copy, file_path, csv_options, script_lines)
         except Exception as e:
             self.printLogInfo(f"Error in saving filtered data:{e}", 3)
             return None
 
     def savePsyData(self):
+        if self._variableCalculationBusy('saving data'):
+            return False
+        if self.model_fit_running:
+            self._showModelFitBusyMessage('saving data')
+            return False
         if self.data is None:
             MessageBox.information(self, 'Warning', "No data exist, please load data first.")
             return False
         try:
             file_path, _ = QFileDialog.getSaveFileName(self, 'Save File', '', 'psyData Files (*.psydata)')
             if file_path:
-                # 将数组数据保存到文件中
-                self.data.to_csv(file_path, sep='|', quoting=csv.QUOTE_NONNUMERIC, index=False, header=True)
-
-                PsyDataFunc.genScript(
+                if os.path.splitext(file_path)[1].lower() != '.psydata':
+                    file_path += '.psydata'
+                script_lines = [
                     f"aggData.data.to_csv({file_path!r}, sep='|', quoting=csv.QUOTE_NONNUMERIC, "
-                    f"index=False, header=True)")
+                    f"index=False, header=True)"]
+                return self._startDataExport(
+                    self.data, file_path,
+                    {'sep': '|', 'quoting': csv.QUOTE_NONNUMERIC, 'index': False, 'header': True},
+                    script_lines)
         except Exception as e:
             self.printLogInfo(f"Error in saving file:{e}", 3)
             return None
+
+    def _dataExportBusy(self, action):
+        """Protect the source and worker lifetime while a data export is pending."""
+        if self._data_export_thread is None:
+            return False
+        MessageBox.information(
+            self, 'Data Export in Progress',
+            f'Data are being exported in the background.\nPlease wait before {action}.')
+        return True
+
+    def _startDataExport(self, dataframe, file_path, csv_options, script_lines):
+        """Start one owned writer without copying the complete frame again."""
+        if self._dataExportBusy('starting another export'):
+            return False
+        worker = DataExportThread(dataframe, file_path, csv_options, script_lines, parent=self)
+        self._data_export_thread = worker
+        worker.finished.connect(self._finishDataExport)
+        try:
+            self.output.printOut(f'Exporting {worker.row_count} rows to {worker.file_path}…', 0, False)
+            self.statusBar().showMessage('Exporting data…')
+            worker.start()
+        except Exception:
+            self._data_export_thread = None
+            worker.deleteLater()
+            self.statusBar().clearMessage()
+            raise
+        return True
+
+    def _finishDataExport(self):
+        """Record successful exports and release guards only after native completion."""
+        worker = self._data_export_thread
+        if worker is None:
+            return
+        self._data_export_thread = None
+        worker.deleteLater()
+        if self._closing:
+            return
+        self.statusBar().clearMessage()
+        if worker.succeeded:
+            try:
+                PsyDataFunc.genScript(worker.script_lines)
+            except Exception as error:
+                self.output.printOut(
+                    f'Data were saved to {worker.file_path}, but script recording failed: {error}', 4, False)
+            self.output.printOut(
+                f'Data export finished: {worker.row_count} rows saved to {worker.file_path}.', 1, False)
+            self.statusBar().showMessage('Data export finished.', 5000)
+        elif worker.cancelled and not worker.error:
+            self.output.printOut('Data export cancelled. The destination was not changed.', 4, False)
+        else:
+            message = f'Could not export data to {worker.file_path}: {worker.error}'
+            self.output.printOut(message, 2, False)
+            MessageBox.warning(self, 'Data Export Failed', message)
+
+    def _shutdownDataExport(self):
+        """Cancel and join the writer only during final application shutdown."""
+        self._closing = True
+        worker = self._data_export_thread
+        if worker is not None:
+            worker.requestInterruption()
+            worker.wait()
 
     # 保存预设文件
     def saveFilterEvent(self):
