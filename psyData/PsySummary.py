@@ -828,17 +828,21 @@ drag the variable back to the variable list.
             while marker in self.data.columns:
                 marker += '_'
 
-            preview_source = self.data.copy()
+            # Filtering needs only rule/group columns, not unrelated experiment data.
+            from app.dataPreparation import split_filter_rule
+            filter_columns = list(dict.fromkeys(
+                row_variables + column_variables + [split_filter_rule(rule)[0] for rule in rules]))
+            preview_source = self.data.loc[:, filter_columns].copy(deep=False)
             preview_source[marker] = np.arange(len(preview_source), dtype=int)
             retained_data = StatisticTool.filterData(
                 row_variables, column_variables, preview_source, rules,
                 record_script=False)
-            retained_ids = set(retained_data[marker].astype(int).tolist())
-            retained_mask = preview_source[marker].isin(retained_ids).to_numpy(dtype=bool)
-            preview_source = preview_source.drop(columns=[marker])
+            retained_mask = np.zeros(len(self.data), dtype=bool)
+            retained_mask[retained_data[marker].to_numpy(dtype=np.intp)] = True
+            del retained_data, preview_source
 
             self.distributionPreviewWindow = DistributionPreviewDialog(
-                preview_source,
+                self.data,
                 retained_mask,
                 target_variables=target_variables,
                 row_facets=row_variables,

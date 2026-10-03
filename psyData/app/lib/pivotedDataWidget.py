@@ -7,7 +7,7 @@ from app.dataPreparation import prepare_summary_frame, safe_mode
 from app.psyDataFunc import PsyDataFunc as Func
 from app.lib.fitRTsDistThread import FitRTsDistThread
 from app.lib.fitCognitiveModelThread import FitCognitiveModelThread
-from app.cognitiveModelSpec import COGNITIVE_MODEL_NAMES, split_target
+from app.cognitiveModelSpec import COGNITIVE_MODEL_NAMES, split_target, resolve_analysis_seeds
 from app.psyDataFunc import PsyDataFunc
 from app.tool import StatisticTool, FlashMessageBox, warnConditionWiseFiltering
 from app.lib.dataFrameTableWidget import ResultFrameTableWidget
@@ -170,7 +170,7 @@ class PivotedDataWidget(QWidget):
         self.cognitiveFitMethods = list(COGNITIVE_MODEL_NAMES)
         self._row_vars = list(row_vars)
         self._col_vars = list(col_vars)
-        self._target_vars = list(target_vars)
+        self._target_vars = resolve_analysis_seeds(target_vars)
         self._target_index = 0
         self._fit_started_count = 0
         self._fit_target_count = sum(
@@ -180,7 +180,7 @@ class PivotedDataWidget(QWidget):
         self._cancel_requested = False
         self._tmp_dataframe = None
 
-        self.initUI(dataframe, row_vars, col_vars, target_vars)
+        self.initUI(dataframe, row_vars, col_vars, self._target_vars)
 
     def fitDistInBackground(self, dataFrame, operation, row_vars, col_vars, independentVarName,
                             distribution='Ex-Gaussian'):

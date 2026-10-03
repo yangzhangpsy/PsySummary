@@ -28,21 +28,27 @@ class DistributionPreviewDialog(QDialog):
         :return: None.
         """
         super().__init__(parent)
-        self.data = data.reset_index(drop=True).copy()
-        self.retained_mask = np.asarray(retained_mask, dtype=bool)
-        if len(self.data) != len(self.retained_mask):
+        self.retained_mask = np.asarray(retained_mask, dtype=bool).copy()
+        if len(data) != len(self.retained_mask):
             raise ValueError('The retained-row mask must have one value per original row.')
         self.target_variables = [
             variable for variable in target_variables
-            if variable in self.data.columns
-            and pd.to_numeric(self.data[variable], errors='coerce').notna().any()]
+            if variable in data.columns
+            and pd.to_numeric(data[variable], errors='coerce').notna().any()]
         if not self.target_variables:
             raise ValueError('Distribution Preview requires at least one numeric Data variable.')
         self.row_facets = [
-            facet for facet in (row_facets or []) if facet in self.data.columns]
+            facet for facet in (row_facets or []) if facet in data.columns]
         self.column_facets = [
             facet for facet in (column_facets or [])
-            if facet in self.data.columns and facet not in self.row_facets]
+            if facet in data.columns and facet not in self.row_facets]
+        preview_columns = list(dict.fromkeys(
+            self.target_variables + self.row_facets + self.column_facets))
+        # Own one compact snapshot; never keep a reference/copy of the whole table.
+        self.data = data.loc[:, preview_columns].copy()
+        self.data.index = pd.RangeIndex(len(self.data))
+        for target in self.target_variables:
+            self.data[target] = pd.to_numeric(self.data[target], errors='coerce')
 
         self.setWindowTitle('Distribution Preview')
         self.resize(1120, 820)
@@ -141,11 +147,10 @@ class DistributionPreviewDialog(QDialog):
         if not facet_columns:
             return [('Overall', np.arange(len(self.data), dtype=int))]
 
-        grouping_frame = self.data[facet_columns].copy()
-        grouping_frame['_preview_position'] = np.arange(len(self.data), dtype=int)
         groups = []
         grouper = facet_columns[0] if len(facet_columns) == 1 else facet_columns
-        for values, frame in grouping_frame.groupby(grouper, sort=False, dropna=False):
+        grouped = self.data.groupby(grouper, sort=False, dropna=False, observed=True)
+        for values, positions in grouped.indices.items():
             value_tuple = values if isinstance(values, tuple) else (values,)
             row_values = value_tuple[:len(row_columns)]
             column_values = value_tuple[len(row_columns):]
@@ -159,12 +164,12 @@ class DistributionPreviewDialog(QDialog):
                     f'{column}={"NA" if pd.isna(value) else value}'
                     for column, value in zip(column_columns, column_values)))
             label = ' | '.join(label_parts)
-            groups.append((label, frame['_preview_position'].to_numpy(dtype=int)))
+            groups.append((label, np.asarray(positions, dtype=np.intp)))
         return groups
 
     def _groupCounts(self, positions, target):
         """Return finite before, excluded, and retained counts for one group."""
-        numeric = pd.to_numeric(self.data.iloc[positions][target], errors='coerce').to_numpy(dtype=float)
+        numeric = self.data[target].iloc[positions].to_numpy(dtype=float, na_value=np.nan)
         valid = np.isfinite(numeric)
         retained = int(np.sum(self.retained_mask[positions][valid]))
         before = int(np.sum(valid))
@@ -205,7 +210,7 @@ class DistributionPreviewDialog(QDialog):
             f'N before: {before_count}   N excluded: {excluded_count}   '
             f'N retained: {retained_count}')
 
-        numeric = pd.to_numeric(self.data.iloc[positions][target], errors='coerce').to_numpy(dtype=float)
+        numeric = self.data[target].iloc[positions].to_numpy(dtype=float, na_value=np.nan)
         valid = np.isfinite(numeric)
         status = self.retained_mask[positions][valid]
         before_values = numeric[valid]

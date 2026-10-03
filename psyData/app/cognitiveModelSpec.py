@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 import math
+import time
 from decimal import Decimal
 from numbers import Real
 
@@ -146,6 +147,20 @@ def target_display_text(target):
     """Return the compact text displayed for a target entry."""
     rt_variable, operation, _specification = split_target(target)
     return f'{rt_variable}@{operation}'
+
+
+def resolve_analysis_seeds(targets):
+    """Freeze time-based seeds on analysis copies, leaving saved GUI drafts unchanged."""
+    resolved = []
+    for target in targets:
+        if isinstance(target, dict):
+            target = deepcopy(target)
+            specification = target.get('model_specification') or target
+            optimizer = specification.setdefault('optimizer', {})
+            if optimizer.get('seed') is None:
+                optimizer['seed'] = int(time.time_ns() % (2 ** 32))
+        resolved.append(target)
+    return resolved
 
 
 def parameter_spec(name, mode, value, lower, upper):

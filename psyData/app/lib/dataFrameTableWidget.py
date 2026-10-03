@@ -8,54 +8,45 @@ from PyQt5.QtCore import QAbstractTableModel, Qt, QModelIndex, pyqtSignal
 
 
 class PandasModel(QAbstractTableModel):
+    """Read individual cells from the supplied frame without viewport snapshots."""
+
     def __init__(self, inputDF, parent=None):
         super(PandasModel, self).__init__(parent)
-        self.start_col = 0
-        self.start_row = 0
-
         self._df = inputDF
-        self._viewport_data = pd.DataFrame()
 
     def rowCount(self, parent=QModelIndex()):
-        return self._df.shape[0]
+        """Expose source rows only at the root of this flat table model."""
+        return 0 if parent.isValid() else self._df.shape[0]
 
     def columnCount(self, parent=QModelIndex()):
-        return self._df.shape[1]
+        """Expose source columns only at the root of this flat table model."""
+        return 0 if parent.isValid() else self._df.shape[1]
 
     def data(self, index, role=Qt.DisplayRole):
-        if not index.isValid():
+        """Return one requested cell, including cells outside the current viewport."""
+        if role != Qt.DisplayRole or not index.isValid() or index.model() is not self:
             return None
-        if role == Qt.DisplayRole:
-            if not self._viewport_data.empty:
-                value = self._viewport_data.iat[index.row() - self.start_row, index.column() - self.start_col]
-                return str(value)
-        # if role == Qt.BackgroundRole:
-        #     return QColor(Qt.white)
+        row, column = index.row(), index.column()
+        if 0 <= row < self._df.shape[0] and 0 <= column < self._df.shape[1]:
+            return str(self._df.iat[row, column])
         return None
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
+        """Preserve source labels and reject invalid header positions."""
         if role == Qt.DisplayRole:
-            if orientation == Qt.Horizontal:
+            if orientation == Qt.Horizontal and 0 <= section < self._df.shape[1]:
                 return str(self._df.columns[section])
-            elif orientation == Qt.Vertical:
+            elif orientation == Qt.Vertical and 0 <= section < self._df.shape[0]:
                 return str(self._df.index[section])
         return None
 
-    def updateViewportData(self, start_row, end_row, start_col, end_col):
-        self.start_col = start_col
-        self.start_row = start_row
-
-        self.beginResetModel()
-        self._viewport_data = self._df.iloc[start_row:end_row + 1, start_col:end_col + 1].copy()
-        self.endResetModel()
-
 
 class DataFrameTableWidget(QMainWindow):
+    COLUMN_SIZE_SAMPLE_ROWS = 100
+
     def __init__(self, dataframe):
         super().__init__()
-        self.start_col = 0
-        self.start_row = 0
-        self.model = PandasModel(dataframe)
+        self.model = PandasModel(dataframe, parent=self)
         self.view = QTableView()
         self.initUI()
 
@@ -66,14 +57,15 @@ class DataFrameTableWidget(QMainWindow):
         self.resize(800, 600)
 
         self.view.setModel(self.model)
+        self.view.horizontalHeader().setResizeContentsPrecision(self.COLUMN_SIZE_SAMPLE_ROWS)
         self.view.resizeColumnsToContents()
         self.view.setAcceptDrops(False)
         self.view.setSelectionMode(QAbstractItemView.NoSelection)
+        self.view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.view.setFocusPolicy(Qt.NoFocus)
         self.view.setAlternatingRowColors(True)
         self.view.setVerticalScrollMode(QTableView.ScrollPerPixel)
         self.view.setHorizontalScrollMode(QTableView.ScrollPerPixel)
-        self.view.viewport().installEventFilter(self)
 
         # 设置表格视图为主窗口的中央部件
         layout = QVBoxLayout()
@@ -82,37 +74,6 @@ class DataFrameTableWidget(QMainWindow):
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
-
-    def eventFilter(self, source, event):
-        if source is self.view.viewport() and event.type() == event.Paint:
-            rect = self.view.viewport().rect()
-
-            self.start_row = self.view.rowAt(rect.top())
-            end_row = self.view.rowAt(rect.bottom())
-
-            self.start_col = self.view.columnAt(rect.left())
-            end_col = self.view.columnAt(rect.right())
-            if end_row == -1:
-                end_row = self.model.rowCount() - 1
-            if end_col == -1:
-                end_col = self.model.columnCount() - 1
-            self.model.updateViewportData(self.start_row, end_row, self.start_col, end_col)
-        return super().eventFilter(source, event)
-
-        # self.setCentralWidget(self.view)
-
-    def on_scroll(self):
-        row_offset = self.view.verticalScrollBar().value()
-        col_offset = self.view.horizontalScrollBar().value()
-
-        view_port_rect = self.view.viewport().geometry()
-        num_rows_to_show = int(view_port_rect.height() / self.view.rowHeight(0))
-        num_cols_to_show = int(3 * view_port_rect.width() / self.view.columnWidth(0))
-
-        self.model.layoutAboutToBeChanged.emit()
-
-        self.model._viewport_data = self.model._df.iloc[row_offset:row_offset + num_rows_to_show, col_offset:col_offset + num_cols_to_show]
-        self.model.layoutChanged.emit()
 
 
 class ResultFrameTableWidget(QTableWidget):

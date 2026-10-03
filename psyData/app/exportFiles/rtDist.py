@@ -3,6 +3,7 @@ import pandas as pd
 from matplotlib import pyplot as plt
 from scipy.stats import norm, chi2, expon, weibull_min, lognorm, invgauss, gamma
 from scipy.optimize import minimize
+from scipy.special import erfcx, log_ndtr, wofz
 
 # reference: 1. Heathcote, A. Fitting wald and ex-wald distributions to response time data:
 # An example using functions for the S-PLUS package.
@@ -34,18 +35,23 @@ def wald_pdf(w, m, a, s=0):
 
 # Wald Cumulative Distribution Function (CDF)
 def wald_cdf(w, m, a, s=0):
-    w = w - s
-    sqrtw = np.sqrt(w)
-    k1 = (m * w - a) / sqrtw
-    k2 = (m * w + a) / sqrtw
+    """Evaluate the Wald CDF without multiplying overflowing/underflowing terms."""
+    return np.exp(_wald_logcdf(np.asarray(w, dtype=float) - s, m, a))
 
-    p1 = np.exp(2 * a * m)
-    p2 = norm.cdf(-k2)
-    bad = (p1 == np.inf) | (p2 == 0)
-    p = p1 * p2
 
-    p[bad] = np.exp(-(k1[bad] ** 2) / 2 - 0.94 / (k2[bad] ** 2)) / (k2[bad] * np.sqrt(2 * np.pi))
-    return p + norm.cdf(k1)
+def _wald_logcdf(values, m, a):
+    """Combine Wald CDF terms in log space using a scaled complementary error function."""
+    values = np.asarray(values, dtype=float)
+    result = np.full_like(values, -np.inf)
+    positive = np.isfinite(values) & (values > 0)
+    root = np.sqrt(values[positive])
+    first = m * root - a / root
+    second = m * root + a / root
+    # 2*a*m - second**2/2 equals -first**2/2; no inf * 0 product.
+    second_term = -0.5 * first ** 2 + np.log(erfcx(second / np.sqrt(2.0))) - np.log(2.0)
+    result[positive] = np.minimum(np.logaddexp(log_ndtr(first), second_term), 0.0)
+    result[np.isposinf(values)] = 0.0
+    return result
 
 
 # Wald random variate generation function
@@ -257,20 +263,49 @@ def exwald_w_function_real_part(x, y):
     Returns:
         np.ndarray: real parts
     """
-    u, v = complex_error_function_real_imag(y, x)
-    return np.exp(y ** 2 - x ** 2) * (np.cos(2 * x * y) * (1 - u) + np.sin(2 * x * y) * v)
+    return wofz(np.asarray(x) + 1j * np.asarray(y)).real
+
+
+def ex_wald_logpdf(r, m, a, t):
+    """Evaluate Ex-Wald log density with stable real/complex branches and full support."""
+    values = np.asarray(r, dtype=float)
+    result = np.full_like(values, -np.inf)
+    if not all(np.isfinite(parameter) and parameter > 0 for parameter in (m, a, t)):
+        return result
+    positive = np.isfinite(values) & (values > 0)
+    times = values[positive]
+    root = np.sqrt(times)
+    residual = a / root - m * root
+    base = -0.5 * residual ** 2
+    k = m ** 2 - 2.0 / t
+    if k < 0:
+        real_part = exwald_w_function_real_part(np.sqrt(-times * k / 2.0), a / (np.sqrt(2.0) * root))
+        # The quadratic exponent is non-positive. wofz avoids exp/cosh series overflow.
+        valid = np.isfinite(real_part) & (real_part > 0)
+        log_density = np.full_like(times, -np.inf)
+        log_density[valid] = base[valid] + np.log(real_part[valid]) - np.log(t)
+    else:
+        rate = np.sqrt(k)
+        first = rate * root - a / root
+        second = rate * root + a / root
+        log_density = np.empty_like(times)
+        leading = first <= 0
+        log_density[leading] = base[leading] + np.log(
+            0.5 * (erfcx(-first[leading] / np.sqrt(2.0))
+                   + erfcx(second[leading] / np.sqrt(2.0)))) - np.log(t)
+        # Rationalize m-rate when tau is small to avoid cancellation in that difference.
+        first_term = (log_ndtr(first[~leading])
+                      + 2.0 * a / (t * (m + rate)) - times[~leading] / t)
+        second_term = base[~leading] + np.log(erfcx(second[~leading] / np.sqrt(2.0))) - np.log(2.0)
+        log_density[~leading] = np.logaddexp(first_term, second_term) - np.log(t)
+    result[positive] = log_density
+    return result
 
 
 # Ex-Wald PDF
 def ex_wald_pdf(r, m, a, t):
-    k = m ** 2 - (2 / t)
-    if k < 0:
-        density = np.exp(m * a - (a ** 2) / (2 * r) - r * (m ** 2) / 2) * exwald_w_function_real_part(
-            np.sqrt(-r * k / 2), a / np.sqrt(2 * r)) / t
-    else:
-        k = np.sqrt(k)
-        density = wald_cdf(r, k, a) * np.exp(a * (m - k) - (r / t)) / t
-    return density
+    """Return the Ex-Wald density, allowing harmless tail underflow to zero."""
+    return np.exp(ex_wald_logpdf(r, m, a, t))
 
 
 # Ex-Wald Cumulative Distribution Function (CDF)
@@ -285,7 +320,18 @@ def ex_wald_cdf(r, m, a, t):
     Returns:
         np.array: cumulative density values at points r
     """
-    return wald_cdf(r, m, a) - t * ex_wald_pdf(r, m, a, t)
+    values = np.asarray(r, dtype=float)
+    result = np.zeros_like(values)
+    positive = np.isfinite(values) & (values > 0)
+    log_wald = _wald_logcdf(values[positive], m, a)
+    log_removed = np.log(t) + ex_wald_logpdf(values[positive], m, a, t)
+    finite = np.isfinite(log_wald)
+    probabilities = np.zeros_like(log_wald)
+    probabilities[finite] = np.exp(log_wald[finite]) * -np.expm1(
+        np.minimum(log_removed[finite] - log_wald[finite], 0.0))
+    result[positive] = np.clip(probabilities, 0.0, 1.0)
+    result[np.isposinf(values)] = 1.0
+    return result
 
 
 # Ex-Wald random variate generation function
@@ -313,8 +359,10 @@ def ex_wald_initial_value_estimate(x, p=0.5):
     Returns:
         np.array: initial parameter estimates (m, a, t)
     """
-    t = p * np.std(x)
-    m = np.sqrt((np.mean(x) - t) / (np.var(x) - t ** 2))
+    mean = float(np.mean(x))
+    variance = max(float(np.var(x)), (mean * 1e-6) ** 2)
+    t = np.clip(p * np.sqrt(variance), 1e-8, max(1e-8, 0.9 * mean))
+    m = np.sqrt(max(mean - t, 1e-8) / max(variance - t ** 2, variance * 1e-6))
     a = m * (np.mean(x) - t)
     return np.array([m, a, t])
 
@@ -329,8 +377,7 @@ def ex_wald_lnlike(p, x):
     Returns:
         float: negative log-likelihood value
     """
-    density = ex_wald_pdf(x, p[0], p[1], p[2])
-    return -np.sum(np.log(density[density > 0]))
+    return _finite_negative_loglike(ex_wald_logpdf(x, p[0], p[1], p[2]))
 
 
 # Fit Ex-Wald distribution to data
@@ -350,6 +397,9 @@ def ex_wald_estimate(rt, p=0.5, scaleit=True):
     Returns:
         OptimizeResult: fitted parameters and chi-square statistics
     """
+    rt = np.asarray(rt, dtype=float)
+    if rt.size < 3 or not np.all(np.isfinite(rt)) or np.any(rt <= 0):
+        raise ValueError('Ex-Wald fitting requires at least three finite positive RT observations.')
     start = ex_wald_initial_value_estimate(rt, p)
     scale = 1 / start if scaleit else None
 
@@ -613,25 +663,28 @@ def _shifted_distribution_lnlike(params, data, distribution, data_bounds=None):
     """Compute a support-aware negative log-likelihood for a shifted distribution."""
     shape, scale, shift = params
     if shape <= 0 or scale <= 0 or shift < 0 or np.any(data <= shift):
-        return np.inf
+        return 1e100
 
-    log_pdf_values = distribution.logpdf(data, shape, loc=shift, scale=scale)
+    log_pdf_values = (_weibull_logpdf(data, shape, scale, shift) if distribution is weibull_min
+                      else distribution.logpdf(data, shape, loc=shift, scale=scale))
     if not np.all(np.isfinite(log_pdf_values)):
-        return np.inf
+        return 1e100
 
-    result = -np.sum(log_pdf_values)
+    result = _finite_negative_loglike(log_pdf_values)
     if data_bounds is not None:
         lower_bound, upper_bound = data_bounds
         if np.min(data) < lower_bound or np.max(data) > upper_bound:
             raise ValueError("Likelihood cannot be computed if any data points are outside the bounds")
         retained_probability = (
-            distribution.cdf(upper_bound, shape, loc=shift, scale=scale)
-            - distribution.cdf(lower_bound, shape, loc=shift, scale=scale)
+            (_weibull_cdf(upper_bound, shape, scale, shift)
+             - _weibull_cdf(lower_bound, shape, scale, shift)) if distribution is weibull_min else
+            (distribution.cdf(upper_bound, shape, loc=shift, scale=scale)
+             - distribution.cdf(lower_bound, shape, loc=shift, scale=scale))
         )
         if not 0 < retained_probability <= 1:
-            return np.inf
+            return 1e100
         result += data.size * np.log(retained_probability)
-    return result
+    return result if np.isfinite(result) and result < 1e100 else 1e100
 
 
 def _estimate_shifted_distribution(data, distribution, start_shape_vals, scale_initializer,
@@ -658,7 +711,7 @@ def _estimate_shifted_distribution(data, distribution, start_shape_vals, scale_i
                 bounds=parameter_bounds,
                 options={'maxiter': 1000},
             )
-            if result.success and np.isfinite(result.fun) and (best_result is None or result.fun < best_result.fun):
+            if result.success and np.isfinite(result.fun) and result.fun < 1e100 and (best_result is None or result.fun < best_result.fun):
                 best_result = result
 
     if best_result is None:
@@ -670,7 +723,50 @@ def weibull_cdf(x, shape, scale):
     """
     Compute the CDF of the Weibull distribution, ensuring values are within [0,1].
     """
-    return np.clip(weibull_min.cdf(x, shape, scale=scale), 0, 1)
+    return _weibull_cdf(x, shape, scale)
+
+
+def _finite_negative_loglike(log_values):
+    """Penalize every invalid observation without infinite finite-difference steps."""
+    if not np.all(np.isfinite(log_values)):
+        return 1e100
+    result = -float(np.sum(log_values))
+    return result if np.isfinite(result) and result < 1e100 else 1e100
+
+
+def _weibull_logpdf(x, shape, scale, shift=0.0):
+    """Evaluate Weibull log density without raising an unbounded power."""
+    values = np.asarray(x, dtype=float) - shift
+    result = np.full_like(values, -np.inf)
+    if not np.isfinite(shape) or not np.isfinite(scale) or shape <= 0 or scale <= 0:
+        return result
+    positive = np.isfinite(values) & (values > 0)
+    log_ratio = np.log(values[positive]) - np.log(scale)
+    log_power = shape * log_ratio
+    # Beyond this limit the likelihood is already worse than the optimizer penalty.
+    evaluable = log_power <= np.log(1e100)
+    log_values = np.full_like(log_ratio, -np.inf)
+    log_values[evaluable] = (np.log(shape) - np.log(scale) + (shape - 1.0) * log_ratio[evaluable]
+                             - np.exp(log_power[evaluable]))
+    result[positive] = log_values
+    return result
+
+
+def _weibull_cdf(x, shape, scale, shift=0.0):
+    """Evaluate Weibull probabilities without overflow, including the far right tail."""
+    values = np.asarray(x, dtype=float) - shift
+    if not np.isfinite(shape) or not np.isfinite(scale) or shape <= 0 or scale <= 0:
+        return np.full_like(values, np.nan)
+    result = np.zeros_like(values)
+    positive = np.isfinite(values) & (values > 0)
+    log_power = shape * (np.log(values[positive]) - np.log(scale))
+    # exp(-power) is below double precision at power=745; the CDF is then exactly 1.
+    saturated = log_power > np.log(745.0)
+    probabilities = np.ones_like(log_power)
+    probabilities[~saturated] = -np.expm1(-np.exp(log_power[~saturated]))
+    result[positive] = probabilities
+    result[np.isposinf(values)] = 1.0
+    return result
 
 
 def weibull_lnlike(params, data, data_bounds=None):
@@ -682,8 +778,7 @@ def weibull_lnlike(params, data, data_bounds=None):
         return 1e100
 
     values = np.asarray(data, dtype=float)
-    with np.errstate(over='ignore', under='ignore', divide='ignore', invalid='ignore'):
-        log_pdf_values = weibull_min.logpdf(values, shape, scale=scale)
+    log_pdf_values = _weibull_logpdf(values, shape, scale)
     if not np.all(np.isfinite(log_pdf_values)):
         return 1e100
 
@@ -762,7 +857,7 @@ def weibull_estimate(data, start_shape_vals=None, data_bounds=None, method="L-BF
 
 def shifted_weibull_cdf(x, shape, scale, shift):
     """Compute the CDF of a three-parameter shifted Weibull distribution."""
-    return np.clip(weibull_min.cdf(x, shape, loc=shift, scale=scale), 0, 1)
+    return _weibull_cdf(x, shape, scale, shift)
 
 
 def shifted_weibull_lnlike(params, data, data_bounds=None):
@@ -1386,7 +1481,8 @@ def fit_rt_distribution(data, distribution_name):
         parameters = np.asarray(result.x, dtype=float)
         negative_log_likelihood = float(result.fun)
         converged = bool(
-            result.success and np.isfinite(negative_log_likelihood) and np.all(np.isfinite(parameters)))
+            result.success and np.isfinite(negative_log_likelihood) and negative_log_likelihood < 1e100
+            and np.all(np.isfinite(parameters)))
         bounds = _rt_distribution_bounds(distribution_name, values)
         boundary_names = [name for name, value, (lower, upper) in zip(parameter_names, parameters, bounds)
                           if _near_bound(value, lower, upper)]
@@ -1442,8 +1538,8 @@ def rt_distribution_pdf(distribution_name, x, parameters):
         'Ex-Gaussian (μ, σ, τ)': lambda v: ex_gaussian_pdf(v, p[0], p[1], p[2]),
         'Inv-Gaussian (μ, λ)': lambda v: invgauss.pdf(v, mu=p[0] / p[1], scale=p[1]),
         'Shifted Inv-Gaussian (μ, λ, shift)': lambda v: invgauss.pdf(v, mu=p[0] / p[1], loc=p[2], scale=p[1]),
-        'Weibull (k, θ)': lambda v: weibull_min.pdf(v, p[0], scale=p[1]),
-        'Shifted Weibull (k, θ, shift)': lambda v: weibull_min.pdf(v, p[0], loc=p[2], scale=p[1]),
+        'Weibull (k, θ)': lambda v: np.exp(_weibull_logpdf(v, p[0], p[1])),
+        'Shifted Weibull (k, θ, shift)': lambda v: np.exp(_weibull_logpdf(v, p[0], p[1], p[2])),
         'LogNormal (k, θ)': lambda v: lognorm.pdf(v, p[0], scale=p[1]),
         'Shifted LogNormal (k, θ, shift)': lambda v: lognorm.pdf(v, p[0], loc=p[2], scale=p[1]),
     }
@@ -1461,8 +1557,8 @@ def rt_distribution_cdf(distribution_name, x, parameters):
         'Ex-Gaussian (μ, σ, τ)': lambda v: ex_gaussian_cdf(v, p[0], p[1], p[2]),
         'Inv-Gaussian (μ, λ)': lambda v: inverse_gaussian_cdf(v, p[0], p[1]),
         'Shifted Inv-Gaussian (μ, λ, shift)': lambda v: shifted_inverse_gaussian_cdf(v, p[0], p[1], p[2]),
-        'Weibull (k, θ)': lambda v: weibull_min.cdf(v, p[0], scale=p[1]),
-        'Shifted Weibull (k, θ, shift)': lambda v: weibull_min.cdf(v, p[0], loc=p[2], scale=p[1]),
+        'Weibull (k, θ)': lambda v: _weibull_cdf(v, p[0], p[1]),
+        'Shifted Weibull (k, θ, shift)': lambda v: _weibull_cdf(v, p[0], p[1], p[2]),
         'LogNormal (k, θ)': lambda v: lognorm.cdf(v, p[0], scale=p[1]),
         'Shifted LogNormal (k, θ, shift)': lambda v: lognorm.cdf(v, p[0], loc=p[2], scale=p[1]),
     }
