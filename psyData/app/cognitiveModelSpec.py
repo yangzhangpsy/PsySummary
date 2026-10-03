@@ -15,7 +15,7 @@ LBA_MODEL = 'Linear Ballistic Accumulator'
 RDM_MODEL = 'Racing Diffusion Model'
 
 COGNITIVE_MODEL_NAMES = (RATCLIFF_MODEL, LBA_MODEL, RDM_MODEL)
-MODEL_SPEC_SCHEMA_VERSION = 2
+MODEL_SPEC_SCHEMA_VERSION = 3
 RTDISTS_REFERENCE_VERSION = '0.12-0'
 ACCURACY_CODING = 'accuracy'
 RESPONSE_CODING = 'response'
@@ -67,8 +67,8 @@ def parameter_tooltip(model, parameter_name):
               'from 0 to A. A must be non-negative and smaller than b.'),
         'b': ('Response threshold. An accumulator wins when its evidence reaches b. '
               'The threshold must be greater than A.'),
-        't0': ('Non-decision time in seconds. It represents encoding and response execution '
-               'outside the evidence-accumulation process.'),
+        't0': ('Lower bound of non-decision time in seconds, covering encoding and response '
+               'execution. When st0 > 0, mean non-decision time is t0 + st0/2.'),
         'st0': ('Across-trial range of non-decision time in seconds. Non-decision time is '
                 'uniformly distributed from t0 to t0 + st0.'),
     }
@@ -81,16 +81,23 @@ def parameter_tooltip(model, parameter_name):
             'v': ('Mean evidence drift toward the correct response. During fitting, its direction '
                   'is oriented from Accuracy and the configured physical response boundaries; '
                   'positive values favor the correct response.'),
-            't0': ('Lower bound of non-decision time in seconds, covering processes such as '
-                   'stimulus encoding and response execution.'),
-            'z': ('Absolute starting point between 0 and a in the configured physical-response '
-                  'coordinates. Accuracy Coding mirrors it to a-z when the correct physical '
-                  'response is lower.'),
+            't0': ('Lower bound of non-decision time in seconds, covering stimulus encoding and '
+                   'response execution. The mean before response-side d offsets is t0 + st0/2.'),
+            'zr': ('Relative starting position of decision evidence: zr = z/a, strictly between '
+                   '0 and 1. zr = 0.5 starts halfway between the boundaries; smaller values '
+                   'favor the configured lower boundary and larger values favor the upper. '
+                   'Fixed zr = 0.5 keeps the starting position centered even when a is Free: '
+                   'the absolute position z = a * zr changes with a. Free zr estimates starting '
+                   'bias. Centered starting evidence alone does not imply equal response '
+                   'probabilities. Accuracy Coding mirrors zr to 1-zr when the correct physical '
+                   'response is lower. This evidence starting position is distinct from the '
+                   'optimizer Value/Start, which initializes parameter estimation.'),
             'd': ('Physical lower/upper response-execution-time difference in seconds. Positive '
                   'values make the configured upper response faster; Accuracy Coding reverses its '
                   'sign when the correct physical response is lower.'),
             'sz': ('Across-trial range of starting-point variability. Trial starting points '
-                   'are uniformly distributed around z with total width sz.'),
+                   'are uniformly distributed around z = a * zr with total absolute width sz. '
+                   'Unlike zr, sz is not relative to a; a * zr +/- sz/2 must stay between 0 and a.'),
             'sv': ('Across-trial standard deviation of drift rate. Trial drift rates follow '
                    'a normal distribution with mean v and standard deviation sv.'),
             'st0': ('Across-trial range of non-decision time. Trial values are uniformly '
@@ -176,39 +183,181 @@ def parameter_spec(name, mode, value, lower, upper):
 
 def default_parameters(model, response_values, minimum_rt=0.2):
     """Return identifiable defaults for a model and its response alternatives."""
-    minimum_rt = max(float(minimum_rt), 1e-3)
-    t0_start = min(0.3, minimum_rt * 0.8)
-    t0_upper = max(minimum_rt * 0.999, t0_start + 1e-3)
+    minimum_rt = float(minimum_rt)
+    minimum_rt = minimum_rt if math.isfinite(minimum_rt) and minimum_rt > 0 else 0.2
+    # A display fallback only; automatic starts are regenerated for each fit group.
+    t0_start = min(0.1, minimum_rt / 2.0)
+    t0_upper = 0.8
     if model == RATCLIFF_MODEL:
-        return [
+        parameters = [
             parameter_spec('a', 'free', 1.0, 0.05, 5.0),
             parameter_spec('v', 'free', 1.0, -10.0, 10.0),
             parameter_spec('t0', 'free', t0_start, 0.0, t0_upper),
-            parameter_spec('z', 'fixed', 0.5, 0.001, 4.999),
+            parameter_spec('zr', 'fixed', 0.5, 0.001, 0.999),
             parameter_spec('d', 'fixed', 0.0, -0.5, 0.5),
             parameter_spec('sz', 'fixed', 0.0, 0.0, 4.999),
             parameter_spec('sv', 'fixed', 0.0, 0.0, 5.0),
-            parameter_spec('st0', 'fixed', 0.0, 0.0, t0_upper),
+            parameter_spec('st0', 'fixed', 0.0, 0.0, 0.6),
             parameter_spec('s', 'fixed', 1.0, 1e-3, 10.0),
         ]
+        return _mark_automatic_parameters(parameters)
 
     parameters = [
         parameter_spec('A', 'free', 0.5, 0.0, 5.0),
         parameter_spec('b', 'free', 1.0, 0.01, 10.0),
         parameter_spec('t0', 'free', t0_start, 0.0, t0_upper),
-        parameter_spec('st0', 'fixed', 0.0, 0.0, t0_upper),
+        parameter_spec('st0', 'fixed', 0.0, 0.0, 0.6),
     ]
     if model == LBA_MODEL:
         for index, _response in enumerate(response_values):
             parameters.append(parameter_spec(f'mean_v[{index + 1}]', 'free', 1.5 - 0.2 * index, 0.01, 10.0))
             parameters.append(parameter_spec(
                 f'sd_v[{index + 1}]', 'fixed' if index == 0 else 'free', 1.0, 0.01, 5.0))
-        return parameters
+        return _mark_automatic_parameters(parameters)
 
     parameters.append(parameter_spec('s', 'fixed', 1.0, 1e-3, 10.0))
     for index, _response in enumerate(response_values):
         parameters.append(parameter_spec(f'v[{index + 1}]', 'free', 2.0 - 0.2 * index, 0.001, 10.0))
+    return _mark_automatic_parameters(parameters)
+
+
+def _mark_automatic_parameters(parameters):
+    """Mark new defaults without assigning automatic ownership to legacy settings."""
+    for parameter in parameters:
+        parameter['start_source'] = 'auto'
+        parameter['auto_value'] = parameter['value']
+        if parameter['name'] in ('t0', 'st0'):
+            parameter['upper_source'] = 'auto'
     return parameters
+
+
+def is_automatic_start(parameter):
+    """Recognize automatic values while protecting programmatic edits of saved rows."""
+    return (parameter.get('start_source') == 'auto'
+            and parameter.get('auto_value', parameter.get('value')) == parameter.get('value'))
+
+
+def update_default_time_bounds(parameters):
+    """Update only automatically owned time bounds after a fixed/free change."""
+    by_name = {parameter['name']: parameter for parameter in parameters}
+    both_free = all(by_name.get(name, {}).get('mode') == 'free' for name in ('t0', 'st0'))
+    for name, upper in (('t0', 0.5 if both_free else 0.8), ('st0', 0.6)):
+        parameter = by_name.get(name)
+        if parameter is not None and parameter.get('upper_source') == 'auto':
+            parameter['upper'] = upper
+
+
+def random_model_start(model, parameters, minimum_rt, rng, randomize_manual=False):
+    """Draw rtdists-inspired starts inside user bounds without evaluating likelihoods.
+
+    :param model: Cognitive model name.
+    :param parameters: Saved parameter rows; missing ownership means a manual start.
+    :param minimum_rt: Smallest positive fitted RT in seconds.
+    :param rng: Run- or dialog-owned NumPy random generator.
+    :param randomize_manual: Whether additional starts may also vary manual free values.
+    :return: Parameter values keyed by name.
+    """
+    values = {row['name']: float(row['value']) for row in parameters}
+    by_name = {row['name']: row for row in parameters}
+
+    def draw(name, low, high, normal_sd=None):
+        row = by_name[name]
+        if row['mode'] != 'free' or (not randomize_manual and not is_automatic_start(row)):
+            return values[name]
+        lower, upper = float(row['lower']), float(row['upper'])
+        left, right = max(lower, low), min(upper, high)
+        if left >= right:
+            # Explicit bounds can intentionally lie outside the reference start interval.
+            left, right = lower, upper
+        if normal_sd is not None:
+            for _ in range(32):
+                sampled = float(rng.normal(0.0, normal_sd))
+                if left <= sampled <= right:
+                    values[name] = sampled
+                    return sampled
+        values[name] = float(rng.uniform(left, right))
+        return values[name]
+
+    if model == RATCLIFF_MODEL:
+        draw('a', 0.5, 3.0)
+        draw('v', -np.inf, np.inf, normal_sd=1.0)
+        draw('zr', 0.4, 0.6)
+        draw('sz', 0.0, 0.5)
+        draw('sv', 0.0, 0.5)
+        draw('d', -np.inf, np.inf, normal_sd=0.05)
+        draw('t0', 0.0, min(0.5, minimum_rt))
+    else:
+        start = draw('A', 0.0, 1.0)
+        draw('b', start, start + 1.0)
+        draw('t0', 0.0, minimum_rt)
+        for name in by_name:
+            if name.startswith(('mean_v[', 'v[', 'sd_v[')):
+                draw(name, 0.0, 1.0)
+    # LBA/RDM examples do not fit st0. This extension uses the tutorial's
+    # uniform range, shortened for very fast observations to aid time support.
+    draw('st0', 0.0, 0.5 if model == RATCLIFF_MODEL else min(0.5, minimum_rt))
+    return values
+
+
+def initial_parameters_are_valid(model, values, minimum_rt, minimum_rt_by_response=None):
+    """Check cheap joint constraints and time support, without calculating densities."""
+    if not all(math.isfinite(value) for value in values.values()):
+        return False
+    if values['t0'] < 0 or values['st0'] < 0:
+        return False
+    if model == RATCLIFF_MODEL:
+        if (values['a'] <= 0 or values['s'] <= 0 or values['sz'] < 0 or values['sv'] < 0
+                or values['a'] * values['zr'] - values['sz'] / 2 <= 0
+                or values['a'] * values['zr'] + values['sz'] / 2 >= values['a']
+                or values['t0'] < abs(values['d']) / 2):
+            return False
+        if minimum_rt_by_response:
+            support = min(rt - (values['d'] / 2 if response == 'lower' else -values['d'] / 2)
+                          for response, rt in minimum_rt_by_response.items())
+        else:
+            support = minimum_rt - abs(values['d']) / 2
+        points = 9
+    else:
+        if values['A'] < 0 or values['b'] <= values['A']:
+            return False
+        if model == LBA_MODEL and any(
+                value <= 0 for name, value in values.items() if name.startswith('sd_v[')):
+            return False
+        if model == RDM_MODEL and (values['s'] <= 0 or any(
+                value < 0 for name, value in values.items() if name.startswith('v['))):
+            return False
+        support, points = minimum_rt, 7
+    # Match the earliest time node used by the existing fixed-node quadrature.
+    # Large st0 can otherwise give zero numerical density even when continuous support exists.
+    earliest = 0.5 * (np.polynomial.legendre.leggauss(points)[0][0] + 1.0)
+    return values['t0'] + earliest * values['st0'] < support
+
+
+def short_rt_summary(specification, dataframe, group_vars=()):
+    """Describe fitted RTs below 50 ms without changing data or rejecting settings."""
+    rt_name = specification.get('rt_variable')
+    response_name = specification.get('response_variable')
+    if rt_name not in dataframe.columns or response_name not in dataframe.columns:
+        return ''
+    rt = pd.to_numeric(dataframe[rt_name], errors='coerce').to_numpy(dtype=float)
+    if specification.get('rt_unit') == 'milliseconds':
+        rt = rt / 1000.0
+    configured = model_response_mapping(specification)
+    mapped = dataframe[response_name].map(
+        lambda value: configured.get(response_value_token(value))).notna().to_numpy()
+    short = np.isfinite(rt) & (rt > 0) & (rt < 0.05) & mapped
+    if not np.any(short):
+        return ''
+    description = (f"{specification.get('model')}, {rt_name}: {int(short.sum())} RT(s) below "
+                   f"50 ms; minimum {float(rt[short].min()) * 1000:.6g} ms.")
+    if group_vars:
+        groups = dataframe.loc[short, list(group_vars)].drop_duplicates()
+        labels = ['; '.join(f'{name}={value}' for name, value in zip(group_vars, row))
+                  for row in groups.head(8).itertuples(index=False, name=None)]
+        description += '\nGroups: ' + ' | '.join(labels)
+        if len(groups) > 8:
+            description += f' | and {len(groups) - 8} more'
+    return description
 
 
 def make_model_specification(model, rt_variable, response_variable, response_values,
@@ -310,6 +459,8 @@ def validate_model_specification(specification, available_variables=None):
             raise ValueError(f"Parameter '{name}' must satisfy Lower <= Value/Start <= Upper.")
 
     by_name = {parameter['name']: parameter for parameter in parameters}
+    if model == RATCLIFF_MODEL and ('zr' not in by_name or 'z' in by_name):
+        raise ValueError('Ratcliff settings require relative starting position zr; recreate Model Settings.')
     if model in (RATCLIFF_MODEL, RDM_MODEL) and by_name.get('s', {}).get('mode') != 'fixed':
         raise ValueError("The diffusion scale parameter 's' must be Fixed for identifiability.")
     if model == LBA_MODEL:
@@ -321,8 +472,9 @@ def validate_model_specification(specification, available_variables=None):
         if not (values['a'] > 0 and values['s'] > 0 and values['sz'] >= 0
                 and values['sv'] >= 0 and values['st0'] >= 0):
             raise ValueError('Diffusion scale and variability parameters are outside their valid ranges.')
-        if values['z'] - values['sz'] / 2.0 <= 0 or values['z'] + values['sz'] / 2.0 >= values['a']:
-            raise ValueError('z ± sz/2 must remain strictly between 0 and a.')
+        if (values['a'] * values['zr'] - values['sz'] / 2.0 <= 0
+                or values['a'] * values['zr'] + values['sz'] / 2.0 >= values['a']):
+            raise ValueError('a × zr ± sz/2 must remain strictly between 0 and a (0 < zr < 1).')
         if values['t0'] - abs(values['d']) / 2.0 < 0:
             raise ValueError('t0 must be at least abs(d)/2.')
     else:

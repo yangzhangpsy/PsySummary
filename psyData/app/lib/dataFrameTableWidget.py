@@ -3,8 +3,44 @@ import pandas as pd
 
 from app.psyDataFunc import PsyDataFunc as Func
 from PyQt5.QtWidgets import QTableWidget, QTableWidgetItem, QVBoxLayout, QHBoxLayout, QWidget, QLabel, QPushButton, \
-    QHeaderView, QApplication, QMainWindow, QTableView, QAbstractItemView
-from PyQt5.QtCore import QAbstractTableModel, Qt, QModelIndex, pyqtSignal
+    QHeaderView, QApplication, QMainWindow, QTableView, QAbstractItemView, QInputDialog, QTabWidget, QMessageBox
+from PyQt5.QtCore import QAbstractTableModel, Qt, QModelIndex, pyqtSignal, QThread
+from app.lib import MessageBox
+from app.expression import validate_variable_name, convert_variable_type
+
+
+def variable_type(series):
+    """Report storage types without scanning or coercing an entire column."""
+    dtype = series.dtype
+    if isinstance(dtype, pd.CategoricalDtype):
+        return 'Category'
+    if pd.api.types.is_bool_dtype(dtype):
+        return 'Boolean'
+    if pd.api.types.is_complex_dtype(dtype):
+        return 'Complex'
+    if pd.api.types.is_numeric_dtype(dtype):
+        return 'Numeric'
+    if pd.api.types.is_datetime64_any_dtype(dtype):
+        return 'Date/Time'
+    return 'Text / Mixed' if pd.api.types.is_object_dtype(dtype) else 'Text'
+
+
+class TypeConversionThread(QThread):
+    """Validate and convert only one column off the GUI thread."""
+
+    def __init__(self, series, target):
+        super().__init__(QApplication.instance())
+        self.original = series
+        self.target = target
+        self.result = None
+        self.error = None
+        QApplication.instance().aboutToQuit.connect(self.wait)
+
+    def run(self):
+        try:
+            self.result = convert_variable_type(self.original, self.target)
+        except Exception as error:
+            self.error = str(error)
 
 
 class PandasModel(QAbstractTableModel):
@@ -13,6 +49,7 @@ class PandasModel(QAbstractTableModel):
     def __init__(self, inputDF, parent=None):
         super(PandasModel, self).__init__(parent)
         self._df = inputDF
+        self.decimals = {}
 
     def rowCount(self, parent=QModelIndex()):
         """Expose source rows only at the root of this flat table model."""
@@ -22,13 +59,24 @@ class PandasModel(QAbstractTableModel):
         """Expose source columns only at the root of this flat table model."""
         return 0 if parent.isValid() else self._df.shape[1]
 
+    def displayDecimals(self, column):
+        """Default float columns to four decimals while honoring explicit Auto."""
+        name = self._df.columns[column]
+        if name in self.decimals:
+            return self.decimals[name]
+        return 4 if pd.api.types.is_float_dtype(self._df[name].dtype) else None
+
     def data(self, index, role=Qt.DisplayRole):
         """Return one requested cell, including cells outside the current viewport."""
         if role != Qt.DisplayRole or not index.isValid() or index.model() is not self:
             return None
         row, column = index.row(), index.column()
         if 0 <= row < self._df.shape[0] and 0 <= column < self._df.shape[1]:
-            return str(self._df.iat[row, column])
+            value = self._df.iat[row, column]
+            decimals = self.displayDecimals(column)
+            if decimals is not None and pd.api.types.is_number(value) and not isinstance(value, (bool, complex)) and pd.notna(value):
+                return format(value, f'.{decimals}f')
+            return str(value)
         return None
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
@@ -44,19 +92,25 @@ class PandasModel(QAbstractTableModel):
 class DataFrameTableWidget(QMainWindow):
     COLUMN_SIZE_SAMPLE_ROWS = 100
 
-    def __init__(self, dataframe):
-        super().__init__()
+    def __init__(self, dataframe, parent=None, rename_callback=None, type_callback=None):
+        super().__init__(parent)
+        self.rename_callback = rename_callback
+        self.type_callback = type_callback
+        self.conversion_running = False
+        self._conversion_worker = None
         self.model = PandasModel(dataframe, parent=self)
         self.view = QTableView()
         self.initUI()
 
     def initUI(self):
         self.setWindowTitle('Data Viewer')
-        self.setWindowIcon(Func.getImageObject("icon.png", type=1))
+        self.setWindowIcon(Func.getImageObject("common/icon.png", type=1))
         self.setWindowFlag(Qt.WindowStaysOnTopHint)
         self.resize(800, 600)
 
         self.view.setModel(self.model)
+        self.view.horizontalHeader().sectionDoubleClicked.connect(self.renameColumn)
+        self.view.horizontalHeader().setToolTip('Double-click a variable name to rename it.')
         self.view.horizontalHeader().setResizeContentsPrecision(self.COLUMN_SIZE_SAMPLE_ROWS)
         self.view.resizeColumnsToContents()
         self.view.setAcceptDrops(False)
@@ -69,11 +123,140 @@ class DataFrameTableWidget(QMainWindow):
 
         # 设置表格视图为主窗口的中央部件
         layout = QVBoxLayout()
-        layout.addWidget(self.view)
+        self.tabs = QTabWidget()
+        self.tabs.setTabPosition(QTabWidget.South)
+        self.tabs.addTab(self.view, 'Data View')
+        self.variable_view = QTableWidget()
+        self.variable_view.setColumnCount(3)
+        self.variable_view.setHorizontalHeaderLabels(['Name', 'Type', 'Decimals'])
+        self.variable_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.variable_view.setAlternatingRowColors(True)
+        self.variable_view.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.variable_view.cellDoubleClicked.connect(self.editVariable)
+        self.tabs.addTab(self.variable_view, 'Variable View')
+        self.tabs.currentChanged.connect(lambda _index: self.refreshVariables())
+        self.model.headerDataChanged.connect(self._headersChanged)
+        layout.addWidget(self.tabs)
 
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
+        self.refreshVariables()
+
+    def refreshVariables(self):
+        """Update lightweight column metadata, never copy the data table."""
+        self.variable_view.setRowCount(self.model.columnCount())
+        for index, name in enumerate(self.model._df.columns):
+            kind = variable_type(self.model._df[name])
+            decimals = self.model.displayDecimals(index) if kind == 'Numeric' else '—'
+            if decimals is None:
+                decimals = 'Auto'
+            for column, value in enumerate((name, kind, decimals)):
+                item = QTableWidgetItem(str(value))
+                item.setToolTip('Double-click to edit.' if column != 2 or kind == 'Numeric' else 'Not applicable to non-numeric variables.')
+                self.variable_view.setItem(index, column, item)
+
+    def _headersChanged(self, orientation, first, last):
+        """Keep formatting attached to renamed variables and refresh the Variable View."""
+        if orientation == Qt.Horizontal:
+            for section in range(first, min(last + 1, self.variable_view.rowCount())):
+                old = self.variable_view.item(section, 0)
+                new = self.model._df.columns[section]
+                if old is not None and old.text() != new and old.text() in self.model.decimals:
+                    self.model.decimals[new] = self.model.decimals.pop(old.text())
+            self.refreshVariables()
+
+    def editVariable(self, row, column):
+        """Edit a name, display precision, or strictly validated storage type."""
+        if self.conversion_running:
+            return
+        if column == 0:
+            self.renameColumn(row)
+            return
+        name = self.model._df.columns[row]
+        if column == 2:
+            if variable_type(self.model._df[name]) != 'Numeric':
+                return
+            options = ['Auto'] + [str(value) for value in range(16)]
+            decimals = self.model.displayDecimals(row)
+            current = str(decimals if decimals is not None else 'Auto')
+            chosen, accepted = QInputDialog.getItem(self, 'Display Decimals', 'Decimals (display only):', options, options.index(current), False)
+            if accepted:
+                self.model.decimals[name] = None if chosen == 'Auto' else int(chosen)
+                self.model.dataChanged.emit(self.model.index(0, row), self.model.index(self.model.rowCount() - 1, row), [Qt.DisplayRole])
+                self.refreshVariables()
+            return
+        chosen, accepted = QInputDialog.getItem(self, 'Convert Variable Type', 'Target type:', ['Numeric', 'Text', 'Boolean'], 0, False)
+        if not accepted:
+            return
+        try:
+            series = self.type_callback(name, chosen, None, self) if self.type_callback else self.model._df[name]
+            worker = TypeConversionThread(series, chosen)
+            self._conversion_worker = worker
+            self._conversion_name = name
+            self.conversion_running = True
+            self.tabs.setEnabled(False)
+            self.setWindowTitle('Data Viewer — Validating type conversion…')
+            worker.finished.connect(self._finishConversion)
+            worker.finished.connect(worker.deleteLater)
+            worker.start()
+        except Exception as error:
+            MessageBox.warning(self, 'Type Conversion Error', str(error))
+
+    def _finishConversion(self):
+        """Confirm the full-column preview before committing any source-data change."""
+        worker = self.sender()
+        try:
+            if worker.error:
+                raise ValueError(worker.error)
+            examples = '\n'.join(f'{worker.original.iloc[i]!r} → {worker.result.iloc[i]!r}' for i in range(min(5, len(worker.original))))
+            message = (f'Convert {self._conversion_name!r} to {worker.target}?\n'
+                       f'All {len(worker.original)} rows were validated. This changes actual data, not only display.\n'
+                       + ('Numeric conversion removes leading zeros and may change textual formatting.\n' if worker.target == 'Numeric' else '')
+                       + '\n' + examples)
+            if QMessageBox.question(self, 'Confirm Type Conversion', message, QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
+            if self.type_callback:
+                self.type_callback(self._conversion_name, worker.target, worker, self)
+            else:
+                self.model._df[self._conversion_name] = worker.result.array
+            self.model.dataChanged.emit(self.model.index(0, 0), self.model.index(self.model.rowCount() - 1, self.model.columnCount() - 1))
+            self.refreshVariables()
+        except Exception as error:
+            MessageBox.warning(self, 'Type Conversion Error', str(error))
+        finally:
+            self.conversion_running = False
+            self._conversion_worker = None
+            worker.result = None
+            self.tabs.setEnabled(True)
+            self.setWindowTitle('Data Viewer')
+
+    def closeEvent(self, event):
+        """Keep the conversion owner alive until validation and confirmation have finished."""
+        if self.conversion_running:
+            MessageBox.information(self, 'Type Conversion in Progress', 'Please wait for type conversion to finish.')
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def renameColumn(self, section):
+        """Request a validated source-column rename without making data cells editable."""
+        if not 0 <= section < self.model.columnCount():
+            return
+        old_name = self.model._df.columns[section]
+        name, accepted = QInputDialog.getText(
+            self, 'Rename Variable', 'Variable name:', text=str(old_name))
+        if not accepted or name.strip() == old_name:
+            return
+        try:
+            if self.rename_callback is not None:
+                self.rename_callback(old_name, name)
+            else:
+                name = validate_variable_name(name, self.model._df)
+                self.model._df.rename(columns={old_name: name}, inplace=True)
+                self.model.headerDataChanged.emit(Qt.Horizontal, section, section)
+        except Exception as error:
+            MessageBox.warning(self, 'Rename Variable Error', str(error))
 
 
 class ResultFrameTableWidget(QTableWidget):
@@ -91,7 +274,7 @@ class ResultFrameTableWidget(QTableWidget):
         self.fitValueLabels = {}
 
         self.setWindowTitle('Result View')
-        self.setWindowIcon(Func.getImageObject("icon.png", type=1))
+        self.setWindowIcon(Func.getImageObject("common/icon.png", type=1))
         self.setFocusPolicy(Qt.NoFocus)
         self.setSelectionMode(QAbstractItemView.NoSelection)
         self.setAlternatingRowColors(True)

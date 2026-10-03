@@ -1,5 +1,5 @@
 import re
-from app.dataPreparation import is_range_expression, parse_checklist_values, split_filter_rule
+from app.dataPreparation import grouped_filter_estimates, is_range_expression, parse_checklist_values, split_filter_rule
 from operator import lt, le, gt, ge
 
 import numpy as np
@@ -174,41 +174,15 @@ def doFilterOutData(row_var_list: list, column_var_list: list, expression: str, 
             elif 'SD' in expression or 'MAD' in expression:
                 multiplier = getValueInExpression(expression)
         else:
-            mean_table = pd.pivot_table(dataFrame, index=row_var_list, columns=column_var_list, values=columnName)
-            std_table = pd.pivot_table(dataFrame, index=row_var_list, columns=column_var_list, values=columnName,
-                                       aggfunc='std')
-            if 'MAD' in expression:
-                median_table = pd.pivot_table(dataFrame, index=row_var_list, columns=column_var_list, values=columnName,
-                                              aggfunc='median')
-                center = sumTable2DataFrame(row_var_list, column_var_list, median_table, dataFrame)
-
-                temp_var_name = columnName + '_temp_median_diff'
-                suffix = 1
-                while temp_var_name in dataFrame:
-                    temp_var_name = f"{columnName}_temp_median_diff_{suffix}"
-                    suffix += 1
-
-                # calculate the MAD b*median(abs(x - median(x)))
-                dataFrame[temp_var_name] = (dataFrame[columnName] - center.iloc[:, 0]).abs()
-
-                median_table2 = pd.pivot_table(dataFrame, index=row_var_list, columns=column_var_list,
-                                               values=temp_var_name,
-                                               aggfunc='median')
-
-                scale = sumTable2DataFrame(row_var_list, column_var_list, median_table2, dataFrame)
-                scale *= 1.4826
-                # remove the temp_var (abs(x - median(x)))
-                dataFrame.drop(columns=[temp_var_name], inplace=True)
-
+            shifting = 'Shifting Z' in expression
+            center, scale, counts = grouped_filter_estimates(
+                dataFrame, row_var_list + column_var_list, columnName,
+                mad='MAD' in expression, count_needed=shifting)
+            if shifting:
+                # Evaluate the coefficient once per distinct count, not once per row.
+                coefficients = {count: StatisticTool.singleShiftZs(count) for count in pd.unique(counts) if pd.notna(count)}
+                multiplier = pd.Series(counts).map(coefficients).to_numpy().reshape(-1, 1)
             else:
-                center = sumTable2DataFrame(row_var_list, column_var_list, mean_table, dataFrame)
-                scale = sumTable2DataFrame(row_var_list, column_var_list, std_table, dataFrame)
-
-            if 'Shifting Z' in expression:
-                count_table = pd.pivot_table(dataFrame, index=row_var_list, columns=column_var_list, values=columnName,
-                                             aggfunc='count')
-                multiplier = sumTable2DataFrame(row_var_list, column_var_list, count_table, dataFrame, True)
-            elif 'SD' in expression or 'MAD' in expression:
                 multiplier = getValueInExpression(expression)
 
         if compareTypeStr == '>' or compareTypeStr == '>=':

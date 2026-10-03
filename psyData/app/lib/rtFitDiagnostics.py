@@ -2,399 +2,102 @@ import html
 
 import numpy as np
 from scipy.integrate import cumulative_trapezoid
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT as NavigationToolbar
 from matplotlib.colors import hsv_to_rgb, to_hex
 from matplotlib.figure import Figure
-from PyQt5.QtCore import QEvent, QRect, QSize, Qt, pyqtSignal
-from PyQt5.QtGui import QStandardItem, QStandardItemModel
+from PyQt5.QtCore import QRect, QSize, Qt, QThread
 from PyQt5.QtWidgets import (
-    QApplication, QButtonGroup, QComboBox, QDialog, QHBoxLayout, QLabel,
-    QRadioButton, QVBoxLayout,
+    QApplication, QCheckBox, QDialog, QHBoxLayout, QLabel,
+    QListWidget, QListWidgetItem, QPushButton, QSplitter, QTextBrowser, QFrame, QVBoxLayout, QWidget,
 )
 
 from app.rtDist import rt_distribution_cdf, rt_distribution_pdf
 from app.cognitiveModelSpec import (
-    ACCURACY_CODING, COGNITIVE_MODEL_NAMES, RATCLIFF_MODEL, RESPONSE_CODING,
+    COGNITIVE_MODEL_NAMES, RATCLIFF_MODEL, RESPONSE_CODING,
 )
 from app.cognitiveModels import fitted_accuracy_pdf, fitted_response_pdf
 
 
-class CheckableComboBox(QComboBox):
-    """Provide a compact multi-select combo box with checkable rows."""
 
-    selectionChanged = pyqtSignal()
-
-    def __init__(self, parent=None):
-        """Initialize the checkable combo box.
-
-        :param parent: Optional parent widget.
-        :return: None.
-        """
-        super().__init__(parent)
-        self.setModel(QStandardItemModel(self))
-        self.setEditable(True)
-        self.lineEdit().setReadOnly(True)
-        self.lineEdit().setPlaceholderText('Select conditions...')
-        self.view().viewport().installEventFilter(self)
-
-    def add_check_item(self, text, checked=False):
-        """Append a checkable condition.
-
-        :param text: User-visible condition label.
-        :param checked: Whether the condition starts selected.
-        :return: None.
-        """
-        item = QStandardItem(text)
-        item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
-        item.setData(Qt.Checked if checked else Qt.Unchecked, Qt.CheckStateRole)
-        self.model().appendRow(item)
-        self._update_summary()
-
-    def checked_indices(self):
-        """Return model-row indices for all selected conditions.
-
-        :return: List of selected row indices.
-        """
-        return [
-            index for index in range(self.model().rowCount())
-            if self.model().item(index).checkState() == Qt.Checked
-        ]
-
-    def eventFilter(self, watched, event):
-        """Toggle a row without closing the popup so several rows can be selected.
-
-        :param watched: Object receiving the event.
-        :param event: Qt event to inspect.
-        :return: Whether the event was consumed.
-        """
-        if watched is self.view().viewport() and event.type() == QEvent.MouseButtonRelease:
-            index = self.view().indexAt(event.pos())
-            if index.isValid():
-                item = self.model().itemFromIndex(index)
-                item.setCheckState(Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked)
-                self._update_summary()
-                self.selectionChanged.emit()
-            return True
-        return super().eventFilter(watched, event)
-
-    def _update_summary(self):
-        """Show the selected condition or a compact count in the line edit.
-
-        :return: None.
-        """
-        selected = [self.model().item(index).text() for index in self.checked_indices()]
-        if len(selected) == 1:
-            summary = selected[0]
-        elif selected:
-            summary = f'{len(selected)} conditions selected'
-        else:
-            summary = ''
-        self.lineEdit().setText(summary)
+_CURVE_LABEL = '\ufff0curve\ufff1'
+_RECORD_LABEL = '\ufff0record\ufff1'
 
 
-class RTFitDiagnosticsDialog(QDialog):
-    """Show empirical RT distributions alongside their fitted PDF and CDF."""
+class _NumericAxes:
+    """Collect numeric plotting commands without importing or calling Matplotlib objects."""
 
-    CURVE_COLORS = [
-        '#0072BD',
-        '#D95319',
-        '#EDB120',
-        '#7E2F8E',
-        '#77AC30',
-        '#4DBEEE',
-        '#A2142F',
-        '#1F77B4',
-        '#FF7F0E',
-        '#2CA02C',
-        '#D62728',
-        '#9467BD',
-        '#8C564B',
-        '#E377C2',
-        '#7F7F7F',
-        '#BCBD22',
-        '#17BECF',
-        '#393B79',
-        '#637939',
-        '#8C6D31',
-        '#843C39',
-        '#7B4173',
-        '#3182BD',
-        '#31A354',
-        '#756BB1',
-        '#636363',
-        '#E6550D',
-    ]
+    def __init__(self, commands, axis, cancel_check):
+        self.commands = commands
+        self.axis = axis
+        self.cancel_check = cancel_check
 
-    def __init__(self, fit_records, parent=None, initial_index=0):
-        """Initialize a selectable diagnostics plot.
+    def _append(self, method, args, options):
+        if self.cancel_check():
+            raise InterruptedError('Curve preparation cancelled.')
+        self.commands.append((self.axis, method, args, options))
 
-        :param fit_records: Fitted group records produced by the RT fitting thread.
-        :param parent: Optional parent widget.
-        :param initial_index: Fit record selected when the dialog opens.
-        :return: None.
-        """
-        super().__init__(parent)
-        self.fit_records = fit_records
-        self.setWindowTitle('RT Fit Diagnostics')
-        self.resize(850, 680)
+    def plot(self, *args, **options):
+        self._append('plot', args, options)
 
-        layout = QVBoxLayout(self)
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel('Display By:'))
-        self.response_mode_button = QRadioButton('Response')
-        self.accuracy_mode_button = QRadioButton('Correct / Error')
-        self.display_mode_group = QButtonGroup(self)
-        self.display_mode_group.setExclusive(True)
-        for button in (self.response_mode_button, self.accuracy_mode_button):
-            self.display_mode_group.addButton(button)
-        initial_record = fit_records[initial_index] if fit_records else {}
-        initial_coding = initial_record.get(
-            'boundary_coding',
-            initial_record.get('specification', {}).get('boundary_coding', RESPONSE_CODING))
-        if initial_coding == ACCURACY_CODING:
-            self.accuracy_mode_button.setChecked(True)
-        else:
-            self.response_mode_button.setChecked(True)
-        self.accuracy_mode_button.setToolTip(
-            'Requires an Accuracy Variable in the cognitive-model settings.')
-        mode_row.addWidget(self.response_mode_button)
-        mode_row.addWidget(self.accuracy_mode_button)
-        mode_row.addStretch(1)
-        self.group_selector = CheckableComboBox()
-        for index, record in enumerate(fit_records):
-            self.group_selector.add_check_item(
-                self._record_label(record), checked=index == initial_index)
-        self.status_label = QLabel()
-        self.status_label.setWordWrap(True)
-        self.figure = Figure(tight_layout=True)
-        self.canvas = FigureCanvas(self.figure)
+    def step(self, *args, **options):
+        self._append('step', args, options)
 
-        layout.addLayout(mode_row)
-        layout.addWidget(self.group_selector)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.canvas)
-        self.group_selector.selectionChanged.connect(self._selection_changed)
-        self.display_mode_group.buttonClicked.connect(self._draw_selected_records)
-        self._update_accuracy_mode_availability()
-        self._draw_selected_records()
-        self._position_within_available_screen()
+    def hist(self, values, bins, density, histtype, **options):
+        # Match Matplotlib's stepfilled histogram, but calculate bins off the GUI thread.
+        counts, edges = np.histogram(values, bins=bins, density=density)
+        self._append('stairs', (counts, edges), dict(options, fill=True))
 
-    @staticmethod
-    def _bounded_geometry(size, center, available):
-        """Return a centered window rectangle constrained to one available screen."""
-        width = min(max(1, size.width()), max(1, available.width()))
-        height = min(max(1, size.height()), max(1, available.height()))
-        maximum_x = available.right() - width + 1
-        maximum_y = available.bottom() - height + 1
-        x = min(max(center.x() - width // 2, available.left()), maximum_x)
-        y = min(max(center.y() - height // 2, available.top()), maximum_y)
-        return QRect(x, y, width, height)
 
-    def _position_within_available_screen(self):
-        """Center on the parent window's screen without crossing its usable bounds."""
-        parent = self.parentWidget()
-        anchor_window = parent.window() if parent is not None else None
-        primary_screen = QApplication.primaryScreen()
-        if anchor_window is not None:
-            center = anchor_window.frameGeometry().center()
-        else:
-            if primary_screen is None:
-                return
-            center = primary_screen.availableGeometry().center()
+class _CurveBuilder:
+    """Prepare color/selection-independent curves using the existing diagnostic formulas."""
 
-        screen = QApplication.screenAt(center) or primary_screen
-        if screen is None:
-            return
-        self.winId()
-        client_geometry = self.geometry()
-        frame_geometry = self.frameGeometry()
-        left_margin = max(0, client_geometry.left() - frame_geometry.left())
-        top_margin = max(0, client_geometry.top() - frame_geometry.top())
-        right_margin = max(0, frame_geometry.right() - client_geometry.right())
-        bottom_margin = max(0, frame_geometry.bottom() - client_geometry.bottom())
-        available = screen.availableGeometry()
-        client_width = min(
-            self.width(), max(1, available.width() - left_margin - right_margin))
-        client_height = min(
-            self.height(), max(1, available.height() - top_margin - bottom_margin))
-        frame_size = QSize(
-            client_width + left_margin + right_margin,
-            client_height + top_margin + bottom_margin)
-        frame_target = self._bounded_geometry(frame_size, center, available)
-        self.setGeometry(
-            frame_target.left() + left_margin,
-            frame_target.top() + top_margin,
-            client_width,
-            client_height,
-        )
+    def __init__(self, accuracy_mode):
+        self.accuracy_mode = accuracy_mode
 
-    def showEvent(self, event):
-        """Revalidate placement in case monitor geometry changed after construction."""
-        self._position_within_available_screen()
-        super().showEvent(event)
-
-    def _selection_changed(self):
-        """Update display-mode availability and redraw after group selection changes."""
-        self._update_accuracy_mode_availability()
-        self._draw_selected_records()
-
-    def _update_accuracy_mode_availability(self):
-        """Enable Correct/Error only when every selected record provides accuracy data."""
-        selected_records = [
-            self.fit_records[index] for index in self.group_selector.checked_indices()
-        ]
-        supported = bool(selected_records) and all(
-            record.get('model') == RATCLIFF_MODEL
-            and bool(record.get('specification', {}).get('accuracy_variable'))
-            and record.get('accuracy') is not None
-            for record in selected_records
-        )
-        self.accuracy_mode_button.setEnabled(supported)
-        if not supported and self.accuracy_mode_button.isChecked():
-            self.response_mode_button.setChecked(True)
-
-    @staticmethod
-    def _group_label(record):
-        """Build a readable label for one fitted group assignment.
-
-        :param record: Fit record dictionary.
-        :return: Human-readable group label.
-        """
-        group_vars = record.get('group_vars', [])
-        group_values = record.get('group_values', ())
-        if not group_vars:
-            group_label = 'Overall'
-        else:
-            group_label = ', '.join(f'{name}={value}' for name, value in zip(group_vars, group_values))
-        return group_label
-
-    @classmethod
-    def _record_label(cls, record):
-        """Build a label containing the distribution and group assignment.
-
-        :param record: Fit record dictionary.
-        :return: Human-readable fit label.
-        """
-        group_label = cls._group_label(record)
-        return f"{record['distribution']} — {group_label}"
-
-    def _draw_selected_records(self):
-        """Overlay density and cumulative diagnostics for all checked groups.
-
-        :return: None.
-        """
-        selected_indices = self.group_selector.checked_indices()
-        self.figure.clear()
-        density_axis = self.figure.add_subplot(211)
-        cdf_axis = self.figure.add_subplot(212)
-        if not selected_indices:
-            self.status_label.setText('Select one or more conditions to display.')
-            density_axis.text(0.5, 0.5, 'No conditions selected', ha='center', va='center')
-            cdf_axis.text(0.5, 0.5, 'No conditions selected', ha='center', va='center')
-            self.canvas.draw_idle()
-            return
-
-        status_lines = []
-        selected_prefixes = {
-            self.fit_records[index].get('result_prefix') for index in selected_indices
-        }
-        use_compact_curve_labels = len(selected_prefixes) == 1
-        curve_counts = [
-            self._record_curve_count(self.fit_records[index]) for index in selected_indices
-        ]
-        curve_colors = self._curve_colors(sum(curve_counts))
-        color_offset = 0
-        for index, curve_count in zip(selected_indices, curve_counts):
-            record = self.fit_records[index]
-            record_colors = curve_colors[color_offset:color_offset + curve_count]
-            color_offset += curve_count
-            color = record_colors[0]
-            label = self._record_label(record)
-            curve_label = self._group_label(record) if use_compact_curve_labels else label
-            if record.get('model') in COGNITIVE_MODEL_NAMES:
-                status_lines.append(self._draw_cognitive_record(
-                    record, density_axis, cdf_axis, record_colors, curve_label, label))
-                continue
-            data = np.asarray(record['data'], dtype=float)
-            parameters = np.asarray(record['parameters'], dtype=float)
-            status = 'Converged' if record['converged'] else 'Not converged'
-            status_lines.append(
-                f'<span style="color:{color}">■</span> <b>{html.escape(label)}</b>: {status}; '
-                f"N={record['n_valid']}; boundary={record['parameter_boundary']} "
-                f"({html.escape(record['boundary_details'])}); shift warning={record['shift_warning']} "
-                f"({html.escape(record['shift_warning_details'])}); LL={self._number(record['log_likelihood'])}; "
-                f"AIC={self._number(record['aic'])}; BIC={self._number(record['bic'])}."
-            )
-            if data.size == 0:
-                continue
-
+    def prepare(self, record, cancel_check):
+        commands = []
+        density_axis = _NumericAxes(commands, 0, cancel_check)
+        cdf_axis = _NumericAxes(commands, 1, cancel_check)
+        if record.get('model') in COGNITIVE_MODEL_NAMES:
+            count = 2 if self.accuracy_mode else max(1, len(record['specification']['response_values']))
+            status = self._draw_cognitive_record(
+                record, density_axis, cdf_axis, list(range(count)), _CURVE_LABEL, _RECORD_LABEL)
+            return {'commands': commands, 'status': status}
+        data = np.asarray(record['data'], dtype=float)
+        parameters = np.asarray(record['parameters'], dtype=float)
+        convergence = 'Converged' if record['converged'] else 'Not converged'
+        status = (
+            f'<b>{_RECORD_LABEL}</b>: {convergence}; '
+            f"N={record['n_valid']}; boundary={record['parameter_boundary']} "
+            f"({html.escape(record['boundary_details'])}); shift warning={record['shift_warning']} "
+            f"({html.escape(record['shift_warning_details'])}); LL={self._number(record['log_likelihood'])}; "
+            f"AIC={self._number(record['aic'])}; BIC={self._number(record['bic'])}.")
+        if data.size:
             bins = min(50, max(8, int(np.sqrt(data.size))))
-            density_axis.hist(
-                data, bins=bins, density=True, histtype='stepfilled', alpha=0.12,
-                color=color, edgecolor=color, label=f'{curve_label} — observed')
+            density_axis.hist(data, bins=bins, density=True, histtype='stepfilled',
+                              alpha=0.12, color=0, edgecolor=0, label=f'{_CURVE_LABEL} — observed')
             sorted_data = np.sort(data)
-            empirical_cdf = np.arange(1, data.size + 1) / data.size
-            cdf_axis.step(
-                sorted_data, empirical_cdf, where='post', color=color, linestyle='--',
-                linewidth=1.8, label=f'{curve_label} — empirical CDF')
-
+            empirical = np.arange(1, data.size + 1) / data.size
+            cdf_axis.step(sorted_data, empirical, where='post', color=0, linestyle='--',
+                          linewidth=1.8, label=f'{_CURVE_LABEL} — empirical CDF')
             if np.all(np.isfinite(parameters)):
                 spread = max(float(np.ptp(data)), abs(float(np.mean(data))) * 0.05, 1e-6)
                 x_values = np.linspace(float(np.min(data)) - 0.05 * spread,
                                        float(np.max(data)) + 0.10 * spread, 500)
                 try:
-                    pdf_values = rt_distribution_pdf(record['distribution'], x_values, parameters)
-                    cdf_values = rt_distribution_cdf(record['distribution'], x_values, parameters)
-                    valid_pdf = np.isfinite(pdf_values) & (pdf_values >= 0)
-                    valid_cdf = np.isfinite(cdf_values)
-                    density_axis.plot(
-                        x_values[valid_pdf], pdf_values[valid_pdf], color=color,
-                        linewidth=2, label=f'{curve_label} — fitted PDF')
-                    cdf_axis.plot(
-                        x_values[valid_cdf], cdf_values[valid_cdf], color=color,
-                        linewidth=2, label=f'{curve_label} — fitted CDF')
+                    pdf = rt_distribution_pdf(record['distribution'], x_values, parameters)
+                    if cancel_check():
+                        raise InterruptedError('Curve preparation cancelled.')
+                    cdf = rt_distribution_cdf(record['distribution'], x_values, parameters)
+                    valid_pdf = np.isfinite(pdf) & (pdf >= 0)
+                    valid_cdf = np.isfinite(cdf)
+                    density_axis.plot(x_values[valid_pdf], pdf[valid_pdf], color=0,
+                                      linewidth=2, label=f'{_CURVE_LABEL} — Fitted model')
+                    cdf_axis.plot(x_values[valid_cdf], cdf[valid_cdf], color=0,
+                                  linewidth=2, label=f'{_CURVE_LABEL} — Fitted model')
                 except Exception as error:
-                    status_lines.append(
-                        f'<span style="color:{color}">Curve unavailable for {html.escape(label)}: '
-                        f'{html.escape(str(error))}</span>')
-
-        self.status_label.setText('<br>'.join(status_lines))
-
-        accuracy_mode = self.accuracy_mode_button.isChecked()
-        density_axis.set_ylabel('Density')
-        density_axis.set_title(
-            'Observed correct/error RT distributions and model-implied densities'
-            if accuracy_mode else 'Observed RT distributions and fitted densities')
-        density_axis.legend(loc='best')
-        cdf_axis.set_xlabel('Reaction time')
-        cdf_axis.set_ylabel('Cumulative probability')
-        cdf_axis.set_title(
-            'Correct/error empirical CDFs (dashed) and model-implied CDFs (solid)'
-            if accuracy_mode else 'Empirical CDFs (dashed) and fitted CDFs (solid)')
-        cdf_axis.set_ylim(-0.02, 1.02)
-        cdf_axis.legend(loc='best')
-        self.canvas.draw_idle()
-
-    def _record_curve_count(self, record):
-        """Return the number of independently colored series drawn for one fit record."""
-        if record.get('model') not in COGNITIVE_MODEL_NAMES:
-            return 1
-        if self.accuracy_mode_button.isChecked():
-            return 2
-        return max(1, len(record.get('specification', {}).get('response_values', [])))
-
-    @classmethod
-    def _curve_colors(cls, count):
-        """Return enough distinct colors for every currently selected curve series."""
-        colors = list(cls.CURVE_COLORS[:count])
-        golden_ratio = 0.618033988749895
-        while len(colors) < count:
-            index = len(colors) - len(cls.CURVE_COLORS)
-            hue = (0.11 + index * golden_ratio) % 1.0
-            saturation = 0.68 if index % 2 == 0 else 0.82
-            value = 0.78 if (index // 2) % 2 == 0 else 0.92
-            colors.append(to_hex(hsv_to_rgb((hue, saturation, value))).upper())
-        return colors
+                    status += f' Curve unavailable: {html.escape(str(error))}.'
+        return {'commands': commands, 'status': status}
 
     def _draw_cognitive_record(self, record, density_axis, cdf_axis, curve_colors,
                                curve_label, label):
@@ -413,7 +116,7 @@ class RTFitDiagnosticsDialog(QDialog):
             status_line += f' Accuracy={self._number(record["accuracy_rate"])}.'
         if data.size == 0:
             return status_line
-        if self.accuracy_mode_button.isChecked():
+        if self.accuracy_mode:
             return self._draw_cognitive_accuracy_record(
                 record, density_axis, cdf_axis, curve_colors, curve_label, status_line)
         specification = record['specification']
@@ -449,14 +152,15 @@ class RTFitDiagnosticsDialog(QDialog):
                 fitted_density = fitted_response_pdf(record, x_values, response_index)
                 density_axis.plot(
                     x_values, fitted_density, color=color, linewidth=2,
-                    label=f'{response_label} — fitted')
+                    label=f'{response_label} — Fitted model')
                 fitted_cdf = cumulative_trapezoid(fitted_density, x_values, initial=0.0)
                 cdf_axis.plot(
                     x_values, fitted_cdf, color=color, linewidth=2,
-                    label=f'{response_label} — fitted')
+                    label=f'{response_label} — Fitted model')
             except Exception as error:
                 status_line += f' Curve unavailable: {html.escape(str(error))}.'
         return status_line
+
 
     def _draw_cognitive_accuracy_record(self, record, density_axis, cdf_axis, curve_colors,
                                         curve_label, status_line):
@@ -520,14 +224,15 @@ class RTFitDiagnosticsDialog(QDialog):
                 response_label = f'{curve_label} / {category_label}'
                 density_axis.plot(
                     x_values, density, color=color, linewidth=2,
-                    label=f'{response_label} — model-implied')
+                    label=f'{response_label} — Fitted model')
                 fitted_cdf = cumulative_trapezoid(density, x_values, initial=0.0)
                 cdf_axis.plot(
                     x_values, fitted_cdf, color=color, linewidth=2,
-                    label=f'{response_label} — model-implied')
+                    label=f'{response_label} — Fitted model')
         except Exception as error:
             status_line += f' Curve unavailable: {html.escape(str(error))}.'
         return status_line
+
 
     @staticmethod
     def _correct_response_weights(responses, accuracy, response_count):
@@ -545,6 +250,7 @@ class RTFitDiagnosticsDialog(QDialog):
         weights /= np.sum(weights)
         return weights, ''
 
+
     @staticmethod
     def _number(value):
         """Format a diagnostic number for the status label.
@@ -553,3 +259,435 @@ class RTFitDiagnosticsDialog(QDialog):
         :return: Compact display string.
         """
         return f'{value:.4f}' if np.isfinite(value) else 'NA'
+
+
+
+class DiagnosticCurveThread(QThread):
+    """Prepare the selected condition and display modes; never access a widget or Matplotlib artist."""
+
+    def __init__(self, jobs, generation):
+        # Application ownership keeps a closing/destroyed result window from destroying a running thread.
+        super().__init__(QApplication.instance())
+        self.jobs = jobs
+        self.generation = generation
+        self.results = {}
+        QApplication.instance().aboutToQuit.connect(self.finishBeforeQuit)
+
+    def run(self):
+        try:
+            for key, record in self.jobs:
+                if self.isInterruptionRequested():
+                    break
+                try:
+                    payload = _CurveBuilder(key[1]).prepare(record, self.isInterruptionRequested)
+                except Exception as error:
+                    payload = {'commands': [], 'status': f'Curve unavailable: {html.escape(str(error))}',
+                               'failed': True}
+                if self.isInterruptionRequested():
+                    break
+                self.results[key] = payload
+        finally:
+            self.jobs = []
+
+    def finishBeforeQuit(self):
+        """Join only during final application shutdown, never during normal GUI interaction."""
+        self.requestInterruption()
+        self.wait()
+
+
+class FitDetailsBrowser(QTextBrowser):
+    """Display rich fit details in a bounded, read-only scrolling region."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._details_text = ''
+        self.setFrameShape(QFrame.NoFrame)
+        self.setStyleSheet('background: transparent;')
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setOpenLinks(False)
+
+    def setText(self, text):
+        """Replace details and reset scrolling without changing the region's height."""
+        self._details_text = text
+        self.setHtml(text)
+        self.verticalScrollBar().setValue(0)
+
+    def text(self):
+        """Return the original rich text for diagnostics inspection."""
+        return self._details_text
+
+
+class RTFitDiagnosticsDialog(QDialog):
+    """Show empirical RT distributions alongside their fitted PDF and CDF."""
+
+    _correct_response_weights = staticmethod(_CurveBuilder._correct_response_weights)
+    _number = staticmethod(_CurveBuilder._number)
+
+    CURVE_COLORS = [
+        '#0072BD',
+        '#D95319',
+        '#EDB120',
+        '#7E2F8E',
+        '#77AC30',
+        '#4DBEEE',
+        '#A2142F',
+        '#1F77B4',
+        '#FF7F0E',
+        '#2CA02C',
+        '#D62728',
+        '#9467BD',
+        '#8C564B',
+        '#E377C2',
+        '#7F7F7F',
+        '#BCBD22',
+        '#17BECF',
+        '#393B79',
+        '#637939',
+        '#8C6D31',
+        '#843C39',
+        '#7B4173',
+        '#3182BD',
+        '#31A354',
+        '#756BB1',
+        '#636363',
+        '#E6550D',
+    ]
+
+    def __init__(self, fit_records, parent=None, initial_index=0):
+        """Initialize the single-condition diagnostics browser.
+
+        :param fit_records: Fitted records available in the left list.
+        :param parent: Optional parent widget.
+        :param initial_index: Record selected when opened from a result cell.
+        :return: None.
+        """
+        super().__init__(parent)
+        self.fit_records = fit_records
+        self._curve_worker = None
+        self._request_generation = 0
+        self._requested_selection = (-1, ())
+        self._closed = False
+        self._updating_modes = False
+        self._mode_preferences = {}
+        self.setWindowTitle('RT Fit Diagnostics')
+        self.resize(1120, 820)
+
+        self.mode_panel = QWidget()
+        mode_row = QHBoxLayout(self.mode_panel)
+        mode_row.setContentsMargins(0, 0, 0, 0)
+        mode_row.addWidget(QLabel('Display By:'))
+        self.response_mode_button = QCheckBox('Response')
+        self.accuracy_mode_button = QCheckBox('Correct / Error')
+        mode_row.addWidget(self.response_mode_button)
+        mode_row.addWidget(self.accuracy_mode_button)
+        mode_row.addStretch()
+
+        self.group_list = QListWidget()
+        self.group_list.setAlternatingRowColors(True)
+        self.group_list.setWordWrap(True)
+        self.group_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.group_list.setMinimumWidth(300)
+        self.group_list.setToolTip('Select one model and Rows × Columns combination.')
+        for record in fit_records:
+            prefix = record.get('result_prefix', '')
+            variable = prefix.split('@', 1)[0] or record.get('specification', {}).get('rt_variable', 'RT')
+            groups = '\n'.join(f'{name} = {value}' for name, value in zip(
+                record.get('group_vars', []), record.get('group_values', ())))
+            text = f"Data: {variable}\nModel: {record['distribution']}"
+            if groups:
+                text += '\n' + groups
+            item = QListWidgetItem(text)
+            item.setToolTip(text)
+            self.group_list.addItem(item)
+        self.status_label = FitDetailsBrowser()
+        # Reserve room once for this result set, not for whichever record is currently selected.
+        self._detail_line_budget = 4
+        for record in fit_records:
+            text = ' '.join(str(record.get(key, '')) for key in (
+                'distribution', 'group_vars', 'group_values', 'boundary_details',
+                'shift_warning_details', 'response_counts'))
+            lines = 3 + (len(text) + 79) // 80
+            if record.get('model') in COGNITIVE_MODEL_NAMES:
+                lines += 4
+            self._detail_line_budget = min(10, max(self._detail_line_budget, lines))
+        self._resize_details_region()
+        self.figure = Figure(tight_layout=True)
+        self.canvas = FigureCanvas(self.figure)
+        self.toolbar = NavigationToolbar(self.canvas, self)
+
+        group_panel = QWidget()
+        group_layout = QVBoxLayout(group_panel)
+        group_layout.setContentsMargins(0, 0, 0, 0)
+        group_heading = QLabel('Data × Model × Rows × Columns combinations:')
+        group_heading.setWordWrap(True)
+        group_layout.addWidget(group_heading)
+        group_layout.addWidget(self.group_list, 1)
+        plot_panel = QWidget()
+        plot_layout = QVBoxLayout(plot_panel)
+        plot_layout.setContentsMargins(0, 0, 0, 0)
+        plot_layout.addWidget(self.status_label)
+        plot_layout.addWidget(self.toolbar)
+        plot_layout.addWidget(self.canvas, 1)
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(group_panel)
+        splitter.addWidget(plot_panel)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([330, 790])
+        self.close_button = QPushButton('Close')
+        close_layout = QHBoxLayout()
+        close_layout.addStretch()
+        close_layout.addWidget(self.close_button)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.mode_panel)
+        layout.addWidget(splitter, 1)
+        layout.addLayout(close_layout)
+        self.group_list.currentRowChanged.connect(self._selection_changed)
+        self.response_mode_button.toggled.connect(self._mode_changed)
+        self.accuracy_mode_button.toggled.connect(self._mode_changed)
+        self.close_button.clicked.connect(self.close)
+        if fit_records:
+            self.group_list.setCurrentRow(min(max(initial_index, 0), len(fit_records) - 1))
+        else:
+            self.response_mode_button.setEnabled(False)
+            self.accuracy_mode_button.setEnabled(False)
+            self.status_label.setText('No fitted conditions available.')
+        self._position_within_available_screen()
+
+    @staticmethod
+    def _bounded_geometry(size, center, available):
+        """Return a centered window rectangle constrained to one available screen."""
+        width = min(max(1, size.width()), max(1, available.width()))
+        height = min(max(1, size.height()), max(1, available.height()))
+        maximum_x = available.right() - width + 1
+        maximum_y = available.bottom() - height + 1
+        x = min(max(center.x() - width // 2, available.left()), maximum_x)
+        y = min(max(center.y() - height // 2, available.top()), maximum_y)
+        return QRect(x, y, width, height)
+
+    def _position_within_available_screen(self):
+        """Center on the parent window's screen without crossing its usable bounds."""
+        parent = self.parentWidget()
+        anchor_window = parent.window() if parent is not None else None
+        primary_screen = QApplication.primaryScreen()
+        if anchor_window is not None:
+            center = anchor_window.frameGeometry().center()
+        else:
+            if primary_screen is None:
+                return
+            center = primary_screen.availableGeometry().center()
+
+        screen = QApplication.screenAt(center) or primary_screen
+        if screen is None:
+            return
+        self.winId()
+        client_geometry = self.geometry()
+        frame_geometry = self.frameGeometry()
+        left_margin = max(0, client_geometry.left() - frame_geometry.left())
+        top_margin = max(0, client_geometry.top() - frame_geometry.top())
+        right_margin = max(0, frame_geometry.right() - client_geometry.right())
+        bottom_margin = max(0, frame_geometry.bottom() - client_geometry.bottom())
+        available = screen.availableGeometry()
+        client_width = min(
+            self.width(), max(1, available.width() - left_margin - right_margin))
+        client_height = min(
+            self.height(), max(1, available.height() - top_margin - bottom_margin))
+        frame_size = QSize(
+            client_width + left_margin + right_margin,
+            client_height + top_margin + bottom_margin)
+        frame_target = self._bounded_geometry(frame_size, center, available)
+        self.setGeometry(
+            frame_target.left() + left_margin,
+            frame_target.top() + top_margin,
+            client_width,
+            client_height,
+        )
+
+    def showEvent(self, event):
+        """Revalidate placement in case monitor geometry changed after construction."""
+        self._position_within_available_screen()
+        super().showEvent(event)
+
+    def _resize_details_region(self):
+        """Bound the shared details height while reserving most of the window for plots."""
+        line_height = self.status_label.fontMetrics().lineSpacing()
+        reserved = self._detail_line_budget * line_height + 8
+        cap = max(3 * line_height + 8, int(self.height() * 0.25))
+        self.status_label.setFixedHeight(min(reserved, cap))
+
+    def resizeEvent(self, event):
+        """Adapt the fixed details region only when the actual window size changes."""
+        super().resizeEvent(event)
+        if hasattr(self, 'status_label'):
+            self._resize_details_region()
+
+    def _selection_changed(self, _row=None):
+        """Configure available views for the newly selected model and request its curves."""
+        index = self.group_list.currentRow()
+        if index < 0:
+            return
+        record = self.fit_records[index]
+        cognitive = record.get('model') in COGNITIVE_MODEL_NAMES
+        supported = (record.get('model') == RATCLIFF_MODEL
+                     and bool(record.get('specification', {}).get('accuracy_variable'))
+                     and record.get('accuracy') is not None)
+        self._updating_modes = True
+        self.response_mode_button.setEnabled(cognitive)
+        self.response_mode_button.setToolTip(
+            'Show response-specific curves of the fitted model.' if cognitive else
+            'This distribution fits Overall RTs, without response-specific views.')
+        self.accuracy_mode_button.setEnabled(supported)
+        self.accuracy_mode_button.setToolTip(
+            'Show Correct/Error views of the same shared fit.' if supported else
+            'Correct/Error diagnostics require a Ratcliff model with Accuracy data.')
+        response, accuracy = self._mode_preferences.get(index, (True, supported))
+        accuracy = accuracy and supported
+        response = cognitive and (response or not accuracy)
+        self.response_mode_button.setChecked(response)
+        self.accuracy_mode_button.setChecked(accuracy)
+        self._updating_modes = False
+        self._draw_selected_records()
+
+    def _mode_changed(self, _checked):
+        """Keep at least one supported cognitive view selected without a warning popup."""
+        if self._updating_modes:
+            return
+        if not self.response_mode_button.isChecked() and not self.accuracy_mode_button.isChecked():
+            self._updating_modes = True
+            self.sender().setChecked(True)
+            self._updating_modes = False
+            return
+        self._mode_preferences[self.group_list.currentRow()] = (
+            self.response_mode_button.isChecked(), self.accuracy_mode_button.isChecked())
+        self._draw_selected_records()
+
+    @staticmethod
+    def _group_label(record):
+        """Build a readable label for one fitted group assignment.
+
+        :param record: Fit record dictionary.
+        :return: Human-readable group label.
+        """
+        group_vars = record.get('group_vars', [])
+        group_values = record.get('group_values', ())
+        if not group_vars:
+            group_label = 'Overall'
+        else:
+            group_label = ', '.join(f'{name}={value}' for name, value in zip(group_vars, group_values))
+        return group_label
+
+    @classmethod
+    def _record_label(cls, record):
+        """Build a label containing the distribution and group assignment.
+
+        :param record: Fit record dictionary.
+        :return: Human-readable fit label.
+        """
+        group_label = cls._group_label(record)
+        return f"{record['distribution']} — {group_label}"
+
+    def _draw_selected_records(self):
+        """Request the single selected record immediately, without caching or debounce."""
+        if self._closed:
+            return
+        index = self.group_list.currentRow()
+        if index < 0:
+            return
+        record = self.fit_records[index]
+        cognitive = record.get('model') in COGNITIVE_MODEL_NAMES
+        modes = tuple(mode for mode, enabled in (
+            (False, self.response_mode_button.isChecked()),
+            (True, self.accuracy_mode_button.isChecked())) if enabled) if cognitive else (False,)
+        self._request_generation += 1
+        self._requested_selection = (index, modes)
+        self.figure.clear()
+        self.canvas.draw_idle()
+        self.status_label.setText(html.escape(self._record_label(record)) + '<br>Updating curves…')
+        if self._curve_worker is not None:
+            self._curve_worker.requestInterruption()
+        else:
+            self._start_requested_curves()
+
+    def _start_requested_curves(self):
+        """Run one application-owned worker for the latest record and selected modes."""
+        if self._closed:
+            return
+        index, modes = self._requested_selection
+        worker = DiagnosticCurveThread(
+            [((index, mode), self.fit_records[index]) for mode in modes], self._request_generation)
+        self._curve_worker = worker
+        worker.finished.connect(self._curves_prepared)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _curves_prepared(self):
+        """Render only the latest request; discard obsolete numeric payloads."""
+        worker = self.sender()
+        if worker is not self._curve_worker:
+            return
+        self._curve_worker = None
+        if not self._closed:
+            if worker.generation == self._request_generation:
+                self._render_selected_records(worker.results)
+            else:
+                self._start_requested_curves()
+        worker.results = {}
+
+    def closeEvent(self, event):
+        """Cancel safely without joining numerical work during normal closure."""
+        self._closed = True
+        self._request_generation += 1
+        if self._curve_worker is not None:
+            self._curve_worker.requestInterruption()
+        super().closeEvent(event)
+
+    def _render_selected_records(self, results):
+        """Create a Density/CDF pair for each selected view on the GUI thread."""
+        index, modes = self._requested_selection
+        record = self.fit_records[index]
+        cognitive = record.get('model') in COGNITIVE_MODEL_NAMES
+        self.figure.clear()
+        axes = self.figure.subplots(len(modes), 2, squeeze=False)
+        status = ''
+        for row, accuracy_mode in enumerate(modes):
+            payload = results[(index, accuracy_mode)]
+            # Correct/Error explanations take precedence; the shared-fit summary appears once.
+            status = payload['status'].replace(_RECORD_LABEL, html.escape(self._record_label(record)), 1)
+            count = (2 if accuracy_mode else max(1, len(record.get('specification', {}).get('response_values', [])))) if cognitive else 1
+            palette = self._curve_colors(count)
+            for axis_index, method, args, prepared_options in payload['commands']:
+                options = dict(prepared_options)
+                for property_name in ('color', 'edgecolor'):
+                    if property_name in options:
+                        options[property_name] = palette[options[property_name]]
+                if 'label' in options:
+                    options['label'] = options['label'].replace(_CURVE_LABEL, '', 1).lstrip(' /—')
+                if method == 'stairs':
+                    options.pop('edgecolor', None)
+                getattr(axes[row, axis_index], method)(*args, **options)
+            view = ('Correct / Error' if accuracy_mode else 'Response') if cognitive else 'Overall'
+            density_axis, cdf_axis = axes[row]
+            density_axis.set_title(f'{view} RT Density', fontsize=10)
+            cdf_axis.set_title(f'{view} RT CDF', fontsize=10)
+            density_axis.set_ylabel('Density')
+            cdf_axis.set_ylabel('Cumulative probability')
+            cdf_axis.set_ylim(-0.02, 1.02)
+            for axis in (density_axis, cdf_axis):
+                axis.set_xlabel('Reaction time')
+                if axis.get_legend_handles_labels()[0]:
+                    axis.legend(loc='best', fontsize=8)
+        self.status_label.setText(status)
+        self.canvas.draw_idle()
+
+    @classmethod
+    def _curve_colors(cls, count):
+        """Return enough distinct colors for every currently selected curve series."""
+        colors = list(cls.CURVE_COLORS[:count])
+        golden_ratio = 0.618033988749895
+        while len(colors) < count:
+            index = len(colors) - len(cls.CURVE_COLORS)
+            hue = (0.11 + index * golden_ratio) % 1.0
+            saturation = 0.68 if index % 2 == 0 else 0.82
+            value = 0.78 if (index // 2) % 2 == 0 else 0.92
+            colors.append(to_hex(hsv_to_rgb((hue, saturation, value))).upper())
+        return colors

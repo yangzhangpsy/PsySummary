@@ -8,6 +8,41 @@ import pandas as pd
 from scipy.stats import boxcox
 
 
+def convert_variable_type(series, target):
+    """Strictly convert one complete column, preserving missingness and rejecting invalid values."""
+    missing = series.isna()
+    if target == 'Text':
+        return series.astype('string')
+    text = series.astype('string')
+    if target == 'Boolean':
+        if pd.api.types.is_numeric_dtype(series.dtype) and not pd.api.types.is_complex_dtype(series.dtype):
+            valid = series.isin([0, 1]) | missing
+            result = series.where(valid).astype('boolean')
+        else:
+            valid = text.isin(['True', 'False', '0', '1']) | missing
+            result = text.map({'True': True, 'False': False, '0': False, '1': True}).astype('boolean')
+    elif target == 'Numeric':
+        if pd.api.types.is_bool_dtype(series.dtype):
+            return series.astype('Int64')
+        valid = text.str.fullmatch(r'[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?', na=False) | missing
+        result = pd.to_numeric(text, errors='coerce')
+        valid &= missing | (result.notna() & np.isfinite(result))
+        # Do not silently round large textual integers through a floating-point dtype.
+        if pd.api.types.is_float_dtype(result.dtype):
+            for position in np.flatnonzero((~missing & text.str.fullmatch(r'[+-]?\d+', na=False)).to_numpy(dtype=bool)):
+                if pd.notna(result.iloc[position]) and int(text.iloc[position]) != int(result.iloc[position]):
+                    valid.iloc[position] = False
+    else:
+        raise ValueError(f'Unsupported variable type: {target}')
+    bad = np.flatnonzero((~valid).to_numpy(dtype=bool))
+    if len(bad):
+        examples = '; '.join(f'row {position + 1}: {series.iloc[position]!r}' for position in bad[:5])
+        raise ValueError(f'{len(bad)} value(s) cannot be converted to {target}. {examples}. No data were changed.')
+    if not result.isna().equals(missing):
+        raise ValueError('Conversion would change missing-value locations. No data were changed.')
+    return result
+
+
 def runBoxcox(values):
     """Return Box-Cox transformed values without the estimated lambda."""
     transformed, _lambda = boxcox(values)
@@ -149,6 +184,24 @@ def evaluate_expression(expression, data_frame):
                 {'__builtins__': {}},
                 {'self': SimpleNamespace(data=data_frame), 'np': np,
                  'runBoxcox': runBoxcox, 'abs': np.abs})
+
+
+def rename_expression_reference(expression, old_name, new_name):
+    """Rename only literal data-column references in a complete expression draft."""
+    if not expression.strip():
+        return expression
+    try:
+        tree = ast.parse(expression, mode='eval')
+    except SyntaxError as error:
+        raise ValueError('Finish or clear the Compute Variable expression before renaming a variable.') from error
+    changed = False
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Subscript)
+                and _attribute_chain(node.value) in {'self.dataFrame', 'self.data', 'aggData.data'}
+                and isinstance(node.slice, ast.Constant) and node.slice.value == old_name):
+            node.slice.value = new_name
+            changed = True
+    return ast.unparse(tree) if changed else expression
 
 
 def validate_variable_name(name, data_frame):

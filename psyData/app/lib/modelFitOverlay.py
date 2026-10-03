@@ -45,7 +45,7 @@ class ModelFitOverlay(QWidget):
 
     def setProgress(self, current, total, label):
         """Display the current model queue position and model label."""
-        self._message = f'Fitting model {current} of {total}…'
+        self._message = f'Fitting model: {current} of {total}…'
         self._detail = str(label)
         self.update()
 

@@ -25,6 +25,7 @@ class FitCognitiveModelThread(QThread):
     fitStatus = pyqtSignal(int, str, bool)
     finished = pyqtSignal(object, list, list, list, object)
     cancelled = pyqtSignal()
+    conditionProgress = pyqtSignal(int, int)
 
     def __init__(self, dataframe, specification, row_vars, col_vars, parent=None,
                  validation_receipt=None):
@@ -76,9 +77,15 @@ class FitCognitiveModelThread(QThread):
             raise ValueError(f"Required model variable(s) are missing: {', '.join(missing)}.")
         prepared = self.dataframe[required].copy()
         fit_records = []
+        grouped = prepared.groupby(group_vars, dropna=False, sort=False) if group_vars else None
+        total_groups = grouped.ngroups if grouped is not None else 1
+        current_group = 0
 
         def fit_group(group_frame, group_values=()):
+            nonlocal current_group
             raise_if_fit_cancelled(cancel_check)
+            current_group += 1
+            self.conditionProgress.emit(current_group, total_groups)
             fit = fit_cognitive_model(
                 group_frame, specification, validate=False,
                 cancel_check=cancel_check)
@@ -112,7 +119,6 @@ class FitCognitiveModelThread(QThread):
 
         if group_vars:
             results = {}
-            grouped = prepared.groupby(group_vars, dropna=False, sort=False)
             for group_key, group_frame in grouped:
                 group_values = group_key if isinstance(group_key, tuple) else (group_key,)
                 results[group_key] = fit_group(group_frame, group_values)

@@ -15,6 +15,7 @@ class FitRTsDistThread(QThread):
     fitStatus = pyqtSignal(int, str, bool)
     finished = pyqtSignal(object, list, list, list, object)
     cancelled = pyqtSignal()
+    conditionProgress = pyqtSignal(int, int)
 
     # Mapping of distribution names to their configurations
     # Structure: {Display Name: (Internal Name, Parameter Names, Estimation Function)}
@@ -112,9 +113,15 @@ class FitRTsDistThread(QThread):
 
         # Perform estimation (with or without grouping)
         fit_records = []
+        groups = prepared_frame.groupby(group_vars) if group_vars else None
+        total_groups = groups.ngroups if groups is not None else 1
+        current_group = 0
 
         def fit_group(series):
+            nonlocal current_group
             raise_if_fit_cancelled(cancel_check)
+            current_group += 1
+            self.conditionProgress.emit(current_group, total_groups)
             fit = fit_rt_distribution(
                 series, dist_key, cancel_check=cancel_check)
             raise_if_fit_cancelled(cancel_check)
@@ -148,7 +155,7 @@ class FitRTsDistThread(QThread):
 
         if group_vars:
             # Grouped estimation
-            grouped_result = prepared_frame.groupby(group_vars)[self.independentVarName].apply(fit_group)
+            grouped_result = groups[self.independentVarName].apply(fit_group)
         else:
             # Single estimation
             grouped_result = pd.Series({'result': fit_group(prepared_frame[self.independentVarName])})

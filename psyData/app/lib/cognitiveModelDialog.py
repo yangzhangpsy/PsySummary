@@ -7,7 +7,7 @@ import pandas as pd
 from PyQt5.QtCore import QSignalBlocker, Qt
 from PyQt5.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QGridLayout, QGroupBox,
-    QLabel, QLineEdit, QMessageBox, QSpinBox, QTableWidget, QTableWidgetItem,
+    QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
     QVBoxLayout,
 )
 
@@ -15,7 +15,9 @@ from app.cognitiveModelSpec import (
     ACCURACY_CODING, BOUNDARY_CODING_LABELS, LBA_MODEL, RATCLIFF_MODEL,
     RESPONSE_CODING, RDM_MODEL, default_parameters,
     make_model_specification, model_response_mapping, parameter_tooltip, response_value_token,
-    validate_model_specification,
+    validate_model_specification, random_model_start, initial_parameters_are_valid,
+    update_default_time_bounds, short_rt_summary,
+    is_automatic_start,
 )
 
 
@@ -44,11 +46,14 @@ class CognitiveModelDialog(QDialog):
         )
         self._response_values = []
         self._parameter_widgets = []
+        self._parameter_metadata = {}
+        self._updating_parameters = False
         self._mapping_widgets = []
         self.setWindowTitle(f'{model} Settings')
         self.resize(820, 760)
         self._build_ui()
         self._load_initial_state()
+        self._refresh_automatic_starts()
         self._update_mapping_presentation()
         self._update_validation()
         self.accuracy_combo.currentTextChanged.connect(self._update_validation)
@@ -84,7 +89,7 @@ class CognitiveModelDialog(QDialog):
             if self.model == RATCLIFF_MODEL else
             'Optional 0/1 correctness variable used for descriptive accuracy output.')
         self.boundary_coding_combo.setToolTip(
-            'Accuracy Coding fits correct/error boundaries and mirrors z and d when the correct '
+            'Accuracy Coding fits correct/error boundaries and mirrors zr and d when the correct '
             'physical response is lower. Response Coding fits the mapped response boundaries and '
             'reverses v when the correct physical response is lower.')
         boundary_coding_label = QLabel('Boundary Coding:')
@@ -128,7 +133,7 @@ class CognitiveModelDialog(QDialog):
                 self.accuracy_mapping_table.setItem(row, column, item)
         self._set_table_visible_rows(self.accuracy_mapping_table, 2)
         self.physical_mapping_label = QLabel(
-            'Physical Response Mapping (used only to orient z and d)')
+            'Physical Response Mapping (used only to orient zr and d)')
         self.mapping_table = QTableWidget(0, 2)
         self.mapping_table.setHorizontalHeaderLabels(['Observed Value', 'Model Response'])
         self.mapping_table.horizontalHeader().setStretchLastSection(True)
@@ -153,6 +158,11 @@ class CognitiveModelDialog(QDialog):
         self.parameter_table.setColumnWidth(2, 190)
         self.parameter_table.setColumnWidth(3, 110)
         parameter_layout.addWidget(self.parameter_table)
+        self.automatic_starts_button = QPushButton('Use Automatic Starts')
+        self.automatic_starts_button.setToolTip(
+            'Restore automatic random starts for Free parameters. Fixed values and bounds are retained.')
+        self.automatic_starts_button.clicked.connect(self._use_automatic_starts)
+        parameter_layout.addWidget(self.automatic_starts_button)
 
         optimizer_group = QGroupBox('Fit Options')
         optimizer_layout = QGridLayout(optimizer_group)
@@ -171,7 +181,7 @@ class CognitiveModelDialog(QDialog):
         iterations_label = QLabel('Maximum Iterations:')
         starts_tip = ('Number of optimizer runs. The best likelihood across the different '
                       'starting points is retained.')
-        seed_tip = ('Seed used to generate additional optimizer starting points. Time-based creates '
+        seed_tip = ('Seed used to generate automatic optimizer starting points. Time-based creates '
                     'a new seed when fitting starts; enter a positive integer for reproducible fits.')
         iterations_tip = 'Maximum number of optimizer iterations allowed for each starting point.'
         starts_label.setToolTip(starts_tip)
@@ -208,7 +218,8 @@ class CognitiveModelDialog(QDialog):
         self.response_combo.currentTextChanged.connect(self._response_variable_changed)
         self.boundary_coding_combo.currentIndexChanged.connect(
             self._boundary_coding_changed)
-        self.unit_combo.currentTextChanged.connect(self._reset_parameters_for_current_mapping)
+        self.unit_combo.currentTextChanged.connect(self._refresh_automatic_starts)
+        self.seed_spin.valueChanged.connect(self._refresh_automatic_starts)
         self.button_box.accepted.connect(self._accept_if_valid)
         self.button_box.rejected.connect(self.reject)
 
@@ -232,7 +243,7 @@ class CognitiveModelDialog(QDialog):
                 ['Observed Response', 'Physical Boundary'])
             self.mapping_table.setToolTip(
                 'This physical response mapping does not define the fitted Correct/Error '
-                'boundaries. It determines when z is mirrored to a-z and d to -d.')
+                'boundaries. It determines when zr is mirrored to 1-zr and d to -d.')
         else:
             self.mapping_group.setTitle(
                 'Boundary Mapping' if self.model == RATCLIFF_MODEL else 'Response Mapping')
@@ -374,11 +385,16 @@ class CognitiveModelDialog(QDialog):
             return
         self._set_parameter_rows(default_parameters(
             self.model, self._response_values, self._minimum_rt_seconds()))
+        self._refresh_automatic_starts()
 
     def _set_parameter_rows(self, parameters):
         """Populate fixed/free parameter controls from serializable rows."""
         self._clear_table_contents(self.parameter_table)
         self._parameter_widgets = []
+        self._parameter_metadata = {row['name']: dict(row) for row in parameters}
+        for row in self._parameter_metadata.values():
+            if not is_automatic_start(row):
+                row['start_source'] = 'manual'
         self.parameter_table.setRowCount(len(parameters))
         for row, parameter in enumerate(parameters):
             name_item = QTableWidgetItem(parameter['name'])
@@ -395,7 +411,10 @@ class CognitiveModelDialog(QDialog):
             mode_combo.setToolTip(
                 f'{description}\n\nFixed keeps this parameter constant. Free estimates it independently in each group.')
             value_edit.setToolTip(
-                f'{description}\n\nEnter the constant value for Fixed mode or optimizer starting value for Free mode.')
+                f'{description}\n\nFree parameters use rtdists-inspired automatic random starts until '
+                'you edit this value. Edited values are retained as the first start. '
+                'Fixed parameters remain constant. Automatic starts are regenerated from the '
+                'current filtered data for each fit group.')
             lower_edit.setToolTip(
                 f'{description}\n\nLower optimization bound used when this parameter is Free.')
             upper_edit.setToolTip(
@@ -405,11 +424,92 @@ class CognitiveModelDialog(QDialog):
             self.parameter_table.setCellWidget(row, 3, lower_edit)
             self.parameter_table.setCellWidget(row, 4, upper_edit)
             self._parameter_widgets.append((parameter['name'], mode_combo, value_edit, lower_edit, upper_edit))
-            mode_combo.currentIndexChanged.connect(self._update_validation)
-            for editor in (value_edit, lower_edit, upper_edit):
-                editor.textChanged.connect(self._update_validation)
+            mode_combo.currentIndexChanged.connect(self._parameter_mode_changed)
+            for field, editor in (('value', value_edit), ('lower', lower_edit), ('upper', upper_edit)):
+                editor.textChanged.connect(
+                    lambda text, name=parameter['name'], field=field:
+                    self._parameter_edited(name, field, text))
         visible_rows = min(max(len(parameters), 6), 9)
         self._set_table_visible_rows(self.parameter_table, visible_rows)
+
+    def _parameter_rows(self):
+        """Serialize rows while retaining automatic/manual ownership metadata."""
+        rows = []
+        for name, mode, value, lower, upper in self._parameter_widgets:
+            row = dict(self._parameter_metadata.get(name, {}))
+            row.update(name=name, mode=mode.currentText(), value=self._draft_number(value.text()),
+                       lower=self._draft_number(lower.text()), upper=self._draft_number(upper.text()))
+            rows.append(row)
+        return rows
+
+    def _parameter_edited(self, name, field, _text):
+        """Preserve user edits independently of subsequent automatic regeneration."""
+        if self._updating_parameters:
+            return
+        metadata = self._parameter_metadata[name]
+        if field == 'value':
+            metadata['start_source'] = 'manual'
+        elif field == 'upper':
+            metadata['upper_source'] = 'manual'
+        self._update_validation()
+
+    def _parameter_mode_changed(self, *_args):
+        """Apply default time bounds only while they remain automatically owned."""
+        if self._updating_parameters:
+            return
+        rows = self._parameter_rows()
+        update_default_time_bounds(rows)
+        by_name = {row['name']: row for row in rows}
+        self._updating_parameters = True
+        try:
+            for name, _mode, _value, _lower, upper in self._parameter_widgets:
+                if name in ('t0', 'st0') and by_name[name].get('upper_source') == 'auto':
+                    upper.setText(str(by_name[name]['upper']))
+        finally:
+            self._updating_parameters = False
+        self._refresh_automatic_starts()
+
+    def _refresh_automatic_starts(self, *_args):
+        """Regenerate automatic free starts without changing fixed values or manual drafts."""
+        if not self._parameter_widgets or self._updating_parameters:
+            return
+        rows = self._parameter_rows()
+        if not any(row['mode'] == 'free' and is_automatic_start(row) for row in rows):
+            self._update_validation()
+            return
+        minimum = self._minimum_rt_seconds()
+        rng = np.random.default_rng(self.seed_spin.value() or None)
+        try:
+            if any(float(row['lower']) >= float(row['upper']) for row in rows):
+                return
+            values = None
+            for _ in range(1000):
+                candidate = random_model_start(self.model, rows, minimum, rng)
+                if (all(float(row['lower']) <= candidate[row['name']] <= float(row['upper'])
+                        for row in rows)
+                        and initial_parameters_are_valid(self.model, candidate, minimum)):
+                    values = candidate
+                    break
+            if values is None:
+                return  # Keep an editable draft; Run reports an impossible initialization.
+            self._updating_parameters = True
+            for name, mode, editor, _lower, _upper in self._parameter_widgets:
+                if mode.currentText() == 'free' and self._parameter_metadata[name].get('start_source') == 'auto':
+                    editor.setText(repr(values[name]))
+                    self._parameter_metadata[name]['auto_value'] = values[name]
+        except (TypeError, ValueError):
+            pass  # Incomplete drafts must stay saveable.
+        finally:
+            self._updating_parameters = False
+            self._update_validation()
+
+    def _use_automatic_starts(self):
+        """Restore automatic ownership for free starts while retaining fixed values and bounds."""
+        for name, mode, value, _lower, _upper in self._parameter_widgets:
+            if mode.currentText() == 'free':
+                self._parameter_metadata[name].update(
+                    start_source='auto', auto_value=self._draft_number(value.text()))
+        self._refresh_automatic_starts()
 
     @staticmethod
     def _clear_table_contents(table):
@@ -456,16 +556,7 @@ class CognitiveModelDialog(QDialog):
             boundary_coding=self.boundary_coding_combo.currentData(),
         )
         specification['response_mapping'] = self._current_mapping()
-        specification['parameters'] = [
-            {
-                'name': name,
-                'mode': mode.currentText(),
-                'value': self._draft_number(value.text()),
-                'lower': self._draft_number(lower.text()),
-                'upper': self._draft_number(upper.text()),
-            }
-            for name, mode, value, lower, upper in self._parameter_widgets
-        ]
+        specification['parameters'] = self._parameter_rows()
         specification['optimizer'] = {
             'method': 'SLSQP',
             'starts': self.starts_spin.value(),
@@ -510,7 +601,7 @@ class CognitiveModelDialog(QDialog):
             if coding == ACCURACY_CODING:
                 message = (
                     'Accuracy Coding fits Correct/Error boundaries. The physical response mapping '
-                    'is retained by using z and d for upper-correct trials and a-z and -d for '
+                    'is retained by using zr and d for upper-correct trials and 1-zr and -d for '
                     'lower-correct trials.')
             else:
                 message = (
@@ -521,7 +612,23 @@ class CognitiveModelDialog(QDialog):
 
     def _accept_if_valid(self):
         """Save the current draft; execution performs strict validation separately."""
-        self.accept()
+        summary = short_rt_summary(self.specification(), self.dataframe)
+        if confirm_short_rt_warning(self, [summary] if summary else [], saving=True):
+            self.accept()
+
+
+def confirm_short_rt_warning(parent, descriptions, saving=False):
+    """Ask whether to retain very short RTs without filtering or changing settings."""
+    if not descriptions:
+        return True
+    action = 'save these settings' if saving else 'continue fitting'
+    return QMessageBox.question(
+        parent, 'Very Short Reaction Times', '\n\n'.join(descriptions) +
+        '\n\nVery short RTs may reflect anticipatory responses or timing problems and can '
+        'restrict non-decision-time estimates. Check the data and consider Filter Data. '
+        'No records or settings will be changed automatically.\n\n'
+        f'Do you still want to {action}?',
+        QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
 
 
 def edit_cognitive_model(dataframe, model, rt_variable, specification=None, parent=None):

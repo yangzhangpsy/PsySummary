@@ -5,6 +5,7 @@ import sys
 import traceback
 import re
 import os
+from copy import deepcopy
 
 import numpy as np
 import pandas as pd
@@ -20,6 +21,7 @@ from app.info import Info
 from app.lib import MessageBox, Settings
 from app.lib.decoding_files import DecodingFiles
 from app.lib.import_mat_thread import ImportMatThread
+from app.lib.import_psydata_thread import ImportPsyDataThread, read_psydata_files
 from app.lib.source_file import addSourceFileColumn
 from app.lib.draggablelistwidget import DraggableListWidget, MainFilterListWidget, \
     VariableDraggableListWidget, MODEL_SPEC_ROLE
@@ -27,6 +29,8 @@ from app.lib.filterWindow import FilterWindow
 from app.lib.dataFrameTableWidget import DataFrameTableWidget
 from app.lib.dataExportThread import DataExportThread
 from app.lib.distributionPreview import DistributionPreviewDialog
+from app.lib.cognitiveModelDialog import confirm_short_rt_warning
+from app.cognitiveModelSpec import short_rt_summary
 from app.lib.modelFitOverlay import ModelFitOverlay
 from app.lib.pivotedDataWidget import (
     MODEL_FIT_METHODS, PivotedDataWidget, PreparedAnalysis, ModelPreparationError,
@@ -36,6 +40,7 @@ from app.psyDataInfo import PsyDataInfo
 from app.lib.scriptDock import ScriptDock
 from app.tool import StatisticTool, FlashMessageBox
 from app.variableCompute import VariableCompute
+from app.expression import validate_variable_name, rename_expression_reference
 from app.output import Output
 from app.cognitiveModelSpec import (
     COGNITIVE_MODEL_NAMES, split_target,
@@ -126,22 +131,12 @@ def checkMatVersion(fileList: list):
 
 def readPsyDataFiles(files):
     try:
-        all_dfs = []
+        combined_df = read_psydata_files(files)
         for file in files:
-            df = pd.read_csv(file, sep='|', quoting=csv.QUOTE_NONNUMERIC, index_col=False)
-            # quoting{0 or csv.QUOTE_MINIMAL, 1 or csv.QUOTE_ALL, 2 or csv.QUOTE_NONNUMERIC, 3 or csv.QUOTE_NONE}, default csv.QUOTE_MINIMAL
-            # combined_df = pd.concat([combined_df, df], ignore_index=True)
-            all_dfs.append(df)
-
             PsyDataInfo.PsyData.printLogInfo(f"Reading file: {file}", 0)
-
-        if all_dfs:
-            combined_df = pd.concat(all_dfs, ignore_index=True)
-
-            PsyDataFunc.list2Script(files, "fileList")
-            PsyDataFunc.genScript(PsyDataFunc.list2Script(files, "fileList"))
-            PsyDataFunc.genScript(f"aggData.readPsyDataFiles(fileList)")
-            return combined_df
+        PsyDataFunc.genScript(PsyDataFunc.list2Script(files, "fileList"))
+        PsyDataFunc.genScript("aggData.readPsyDataFiles(fileList)")
+        return combined_df
     except Exception as e:
         raise IOError(f"File reading Error: {e}")
 
@@ -154,6 +149,7 @@ class PsyData(QMainWindow):
         self.plugin_mode = False
         self.readMatThreads = dict()
         self._mat_import_results = {}
+        self._psydata_import_worker = None
         self._mat_import_job_id = 0
         self._mat_import_append = False
         QApplication.instance().aboutToQuit.connect(self._shutdownDataImports)
@@ -498,9 +494,11 @@ drag the variable back to the variable list.
             elif file_extension == '.mat':
                 self.readMatlabFilesMThread(files)
             elif file_extension == '.psydata':
-                self.data = readPsyDataFiles(files)
-                self.clearAllListAndSetData()
-                self.updateRecentFiles(files)
+                worker = ImportPsyDataThread(files, self)
+                self._psydata_import_worker = worker
+                worker.finished.connect(self._finishPsyDataImport)
+                self.printLogInfo('Reading data files in the background…', 0)
+                worker.start()
             else:
                 raise ValueError(f"Unsupported data file type: {file_extension or 'no extension'}")
         except Exception as e:
@@ -644,9 +642,43 @@ drag the variable back to the variable list.
             self.script_dock.text_edit.setPlainText(previous_script)
             self.printLogInfo(f'MAT import failed: {error}', 2)
 
+    def _finishPsyDataImport(self):
+        """Commit a complete file batch on the GUI thread, leaving old data on failure."""
+        worker = self.sender()
+        if worker is not self._psydata_import_worker:
+            return
+        try:
+            if self._closing or worker.cancelled:
+                return
+            if worker.error:
+                self.printLogInfo(f'Data import failed: {worker.error}', 2)
+                MessageBox.warning(self, 'Data Import Error', worker.error)
+                return
+            previous_data = self.data
+            previous_script = self.script_dock.text_edit.toPlainText()
+            try:
+                PsyDataFunc.genScript(PsyDataFunc.list2Script(worker.files, 'fileList'))
+                PsyDataFunc.genScript('aggData.readPsyDataFiles(fileList)')
+                self.data = worker.data
+                self.clearAllListAndSetData()
+                self.updateRecentFiles(worker.files)
+                for path in worker.files:
+                    self.printLogInfo(f'Reading file: {path}', 0)
+                self.printLogInfo('Data import finished.', 1)
+            except Exception as error:
+                self.data = previous_data
+                self.script_dock.text_edit.setPlainText(previous_script)
+                self.printLogInfo(f'Data import failed: {error}', 2)
+        finally:
+            worker.data = None
+            self._psydata_import_worker = None
+            worker.deleteLater()
+
+
     def _dataImportBusy(self):
         """Keep source-dependent actions blocked until import cleanup has completed."""
-        if self.readMatThreads or getattr(self.import_file, 'final_read_thread', None) is not None:
+        if (self.readMatThreads or self._psydata_import_worker is not None
+                or getattr(self.import_file, 'final_read_thread', None) is not None):
             MessageBox.information(self, 'Data Import in Progress', 'Please wait for data import to finish.')
             return True
         return False
@@ -655,6 +687,8 @@ drag the variable back to the variable list.
         """Wait for owned import threads only during final application shutdown."""
         self._closing = True
         workers = list(self.readMatThreads.values())
+        if self._psydata_import_worker is not None:
+            workers.append(self._psydata_import_worker)
         for worker in workers:
             worker.requestInterruption()
         for worker in workers:
@@ -785,13 +819,156 @@ drag the variable back to the variable list.
                 return False
 
             df = self.getFilteredDataFrame()
-            self.tableFrame = DataFrameTableWidget(df)
+            source = self.data
+            self.tableFrame = DataFrameTableWidget(
+                df, self, lambda old, new: self.renameVariable(old, new, source),
+                lambda name, target, worker, viewer: self.convertVariableType(name, target, source, worker, viewer))
+            self.tableFrame.source_frame = source
             self.tableFrame.show()
         except Exception as e:
             MessageBox.warning(self, "Show Filtered Data Error", f"{e}")
             return None
 
     # filter 触发事件
+    def convertVariableType(self, name, target, source, worker, owner):
+        """Validate dependencies, then atomically commit a confirmed full-source column conversion."""
+        if self._variableCalculationBusy('converting a variable', exclude_viewer=owner):
+            raise ValueError('Please wait for the current data operation to finish.')
+        if self.model_fit_running:
+            raise ValueError('Please wait for model fitting to finish.')
+        if source is not self.data or name not in source:
+            raise ValueError('The source data changed. Reopen Data Viewer.')
+        references = []
+        for widget, label in ((self.rows_list, 'Rows'), (self.columns_list, 'Columns'),
+                              (self.data_list, 'Data'), (self.filter_list, 'Filters')):
+            for index in range(widget.count()):
+                item = widget.item(index)
+                text = item.text()
+                variable = text.partition('@')[0] if widget is self.data_list else text.partition(':')[0].strip() if widget is self.filter_list else text
+                specification = item.data(MODEL_SPEC_ROLE) if widget is self.data_list else None
+                if variable == name or (specification and any(specification.get(field) == name
+                        for field in ('rt_variable', 'response_variable', 'accuracy_variable'))):
+                    references.append(label)
+        if references:
+            raise ValueError('This variable is referenced by ' + ', '.join(sorted(set(references)))
+                             + '. Remove these references before changing its type, then reconfigure them.')
+        if worker is None:
+            return source[name]
+        if not source[name].equals(worker.original):
+            raise ValueError('The source column changed during validation. No conversion was applied.')
+        previous_script = self.script_dock.text_edit.toPlainText()
+        original = source[name]
+        try:
+            PsyDataFunc.genScript('from expression import convert_variable_type')
+            PsyDataFunc.genScript(f'aggData.data[{name!r}] = convert_variable_type(aggData.data[{name!r}], {target!r}).array')
+            source[name] = worker.result.array
+            filtered = self.getFilteredDataFrame()
+        except Exception:
+            source[name] = original.array
+            self.script_dock.text_edit.setPlainText(previous_script)
+            raise
+        for viewer in self.findChildren(DataFrameTableWidget):
+            if getattr(viewer, 'source_frame', None) is source:
+                viewer.model._df = filtered
+                viewer.model.dataChanged.emit(viewer.model.index(0, 0), viewer.model.index(
+                    viewer.model.rowCount() - 1, viewer.model.columnCount() - 1))
+                viewer.refreshVariables()
+        self.computationVariableGui.updateData(source)
+        self.data_list.setModelContext(source, self.getFilteredDataFrame)
+        if self.filterWindow is not None:
+            self.filterWindow.close()
+        if self.distributionPreviewWindow is not None:
+            self.distributionPreviewWindow.close()
+        self.printLogInfo(f'Variable type converted: {name} → {target}', 1)
+        return True
+
+
+    def renameVariable(self, old_name, new_name, source):
+        """Atomically rename a source column and current structured analysis references."""
+        if self._variableCalculationBusy('renaming a variable'):
+            return False
+        if self.model_fit_running:
+            self._showModelFitBusyMessage('renaming a variable')
+            return False
+        if source is not self.data or old_name not in self.data.columns:
+            raise ValueError('The source data changed. Reopen Data Viewer before renaming a variable.')
+        if new_name.strip() == old_name:
+            return True
+        new_name = validate_variable_name(new_name, self.data)
+        compute = self.computationVariableGui
+        draft = rename_expression_reference(compute.numeric_expression.text(), old_name, new_name)
+        plans = []
+        for widget in (self.variables_list, self.rows_list, self.columns_list, self.data_list, self.filter_list):
+            for index in range(widget.count()):
+                item = widget.item(index)
+                old_text = item.text()
+                text = old_text
+                specification = item.data(MODEL_SPEC_ROLE) if widget is self.data_list else None
+                renamed = deepcopy(specification)
+                if renamed:
+                    for field in ('rt_variable', 'response_variable', 'accuracy_variable'):
+                        if renamed.get(field) == old_name:
+                            renamed[field] = new_name
+                if widget is self.data_list:
+                    variable, separator, operation = text.partition('@')
+                    if variable == old_name:
+                        text = new_name + separator + operation
+                elif widget is self.filter_list:
+                    variable, separator, expression = text.partition(':')
+                    if variable.strip() == old_name:
+                        text = new_name + separator + expression
+                elif text == old_name:
+                    text = new_name
+                plans.append((widget, item, old_text, specification, text, renamed))
+        previous_script = self.script_dock.text_edit.toPlainText()
+        previous_draft = compute.numeric_expression.text()
+        previous_target = compute.target_input.text()
+        viewers = [viewer for viewer in self.findChildren(DataFrameTableWidget)
+                   if getattr(viewer, 'source_frame', None) is source]
+        frames = {id(source): source}
+        frames.update({id(viewer.model._df): viewer.model._df for viewer in viewers})
+        try:
+            PsyDataFunc.genScript(f'aggData.data.rename(columns={{{old_name!r}: {new_name!r}}}, inplace=True)')
+            for frame in frames.values():
+                frame.rename(columns={old_name: new_name}, inplace=True)
+            for widget, item, _old, _spec, text, renamed in plans:
+                item.setText(text)
+                if widget is self.data_list:
+                    item.setData(MODEL_SPEC_ROLE, renamed)
+            for widget in (self.variables_list, self.rows_list, self.columns_list, self.data_list):
+                widget.contentList = getListWidgetData(widget)
+            self.variablesNameList = self.data.columns.tolist()
+            compute.updateData(self.data)
+            compute.numeric_expression.setText(draft)
+            if previous_target.strip() == old_name:
+                compute.target_input.setText(new_name)
+            self.data_list.setModelContext(self.data, self.getFilteredDataFrame)
+        except Exception:
+            for frame in frames.values():
+                frame.rename(columns={new_name: old_name}, inplace=True)
+            for widget, item, text, specification, _new, _renamed in plans:
+                item.setText(text)
+                if widget is self.data_list:
+                    item.setData(MODEL_SPEC_ROLE, specification)
+            for widget in (self.variables_list, self.rows_list, self.columns_list, self.data_list):
+                widget.contentList = getListWidgetData(widget)
+            self.variablesNameList = self.data.columns.tolist()
+            compute.updateData(self.data)
+            compute.numeric_expression.setText(previous_draft)
+            compute.target_input.setText(previous_target)
+            self.script_dock.text_edit.setPlainText(previous_script)
+            raise
+        for viewer in viewers:
+            viewer.model.headerDataChanged.emit(Qt.Horizontal, 0, viewer.model.columnCount() - 1)
+        # These windows contain snapshots or unsaved variable selectors; reopen with current names.
+        if self.filterWindow is not None:
+            self.filterWindow.close()
+        if self.distributionPreviewWindow is not None:
+            self.distributionPreviewWindow.close()
+        self.printLogInfo(f'Variable renamed: {old_name} → {new_name}', 1)
+        return True
+
+
     def defineFilterEvent(self):
         if self._variableCalculationBusy('defining filters'):
             return False
@@ -894,6 +1071,17 @@ drag the variable back to the variable list.
                 for target in dataList)
 
             prepared = PreparedAnalysis(self.data, rowList, columnList, dataList, items)
+
+            short_rt_descriptions = []
+            for target in prepared.target_vars:
+                _variable, _model, specification = split_target(target)
+                if specification:
+                    description = short_rt_summary(
+                        specification, prepared.dataframe, prepared.row_vars + prepared.col_vars)
+                    if description:
+                        short_rt_descriptions.append(description)
+            if not confirm_short_rt_warning(self, short_rt_descriptions):
+                return None
 
             if contains_model_fit:
                 self.model_fit_running = True
@@ -1159,6 +1347,10 @@ drag the variable back to the variable list.
         self._syncAggregationResultsControls()
 
     def closeEvent(self, event):
+        if any(viewer.conversion_running for viewer in self.findChildren(DataFrameTableWidget)):
+            MessageBox.information(self, 'Type Conversion in Progress', 'Please wait for type conversion to finish.')
+            event.ignore()
+            return
         if self._analysisPreparationBusy('closing PsySummary'):
             event.ignore()
             return
@@ -1227,13 +1419,18 @@ drag the variable back to the variable list.
         self.variables_list.addItem(newVariableName)
         self.variables_list.sortItems(Qt.AscendingOrder)
 
-    def _variableCalculationBusy(self, action):
+    def _variableCalculationBusy(self, action, exclude_viewer=None):
         """Prevent competing source-data operations during import or calculation."""
         if self._analysisPreparationBusy(action):
             return True
         if self._dataExportBusy(action):
             return True
         if self._dataImportBusy():
+            return True
+        if any(viewer is not exclude_viewer and viewer.conversion_running
+               for viewer in self.findChildren(DataFrameTableWidget)):
+            MessageBox.information(self, 'Type Conversion in Progress',
+                                   f'Please wait for type conversion to finish before {action}.')
             return True
         if not self.computationVariableGui.computation_running:
             return False
@@ -1391,9 +1588,9 @@ drag the variable back to the variable list.
                         f"filteredDataFrame.to_csv({file_path!r}, index=False, header=True)")
                 else:
                     csv_options.update(sep='|', quoting=csv.QUOTE_NONNUMERIC)
+                    script_lines.append('from dataPreparation import write_psydata')
                     script_lines.append(
-                        f"filteredDataFrame.to_csv({file_path!r}, sep='|', quoting=csv.QUOTE_NONNUMERIC, "
-                        f"index=False, header=True)")
+                        f"write_psydata(filteredDataFrame, {file_path!r})")
                 return self._startDataExport(filtered_copy, file_path, csv_options, script_lines)
         except Exception as e:
             self.printLogInfo(f"Error in saving filtered data:{e}", 3)
@@ -1414,8 +1611,8 @@ drag the variable back to the variable list.
                 if os.path.splitext(file_path)[1].lower() != '.psydata':
                     file_path += '.psydata'
                 script_lines = [
-                    f"aggData.data.to_csv({file_path!r}, sep='|', quoting=csv.QUOTE_NONNUMERIC, "
-                    f"index=False, header=True)"]
+                    'from dataPreparation import write_psydata',
+                    f"write_psydata(aggData.data, {file_path!r})"]
                 return self._startDataExport(
                     self.data, file_path,
                     {'sep': '|', 'quoting': csv.QUOTE_NONNUMERIC, 'index': False, 'header': True},

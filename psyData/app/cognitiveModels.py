@@ -21,11 +21,15 @@ try:
     from app.cognitiveModelSpec import (
         ACCURACY_CODING, LBA_MODEL, RATCLIFF_MODEL, RESPONSE_CODING, RDM_MODEL,
         model_response_mapping, response_value_token, validate_model_data,
+        random_model_start, initial_parameters_are_valid,
+        is_automatic_start,
     )
 except ImportError:  # Standalone PsySummary analysis-script export.
     from cognitiveModelSpec import (
         ACCURACY_CODING, LBA_MODEL, RATCLIFF_MODEL, RESPONSE_CODING, RDM_MODEL,
         model_response_mapping, response_value_token, validate_model_data,
+        random_model_start, initial_parameters_are_valid,
+        is_automatic_start,
     )
 
 
@@ -432,7 +436,10 @@ def _parameter_values(specification, free_values=None):
 def _model_arguments(model, parameter_values, response_count):
     """Convert flat parameter names into numerical model keyword arguments."""
     if model == RATCLIFF_MODEL:
-        return {name: parameter_values[name] for name in ('a', 'v', 't0', 'z', 'd', 'sz', 'sv', 'st0', 's')}
+        arguments = {name: parameter_values[name]
+                     for name in ('a', 'v', 't0', 'd', 'sz', 'sv', 'st0', 's')}
+        arguments['z'] = parameter_values['a'] * parameter_values['zr']
+        return arguments
     common = {name: parameter_values[name] for name in ('A', 'b', 't0', 'st0')}
     if model == LBA_MODEL:
         common['mean_v'] = [parameter_values[f'mean_v[{index}]'] for index in range(1, response_count + 1)]
@@ -458,8 +465,8 @@ def _constraint_margins(model, values):
             values['sz'],
             values['sv'],
             values['st0'],
-            values['z'] - values['sz'] / 2.0 - epsilon,
-            values['a'] - values['z'] - values['sz'] / 2.0 - epsilon,
+            values['a'] * values['zr'] - values['sz'] / 2.0 - epsilon,
+            values['a'] * (1.0 - values['zr']) - values['sz'] / 2.0 - epsilon,
             values['t0'] - abs(values['d']) / 2.0,
         ])
     margins = [
@@ -573,7 +580,6 @@ def _fit_response_model(dataframe, specification, cancel_check=None):
             model_responses = np.where(accuracy_values == 1, 'upper', 'lower').astype(object)
 
     free_parameters = [parameter for parameter in specification['parameters'] if parameter['mode'] == 'free']
-    initial = np.asarray([float(parameter['value']) for parameter in free_parameters])
     bounds = [(float(parameter['lower']), float(parameter['upper'])) for parameter in free_parameters]
     pdf_function = diffusion_pdf if model == RATCLIFF_MODEL else lba_pdf if model == LBA_MODEL else rdm_pdf
 
@@ -598,16 +604,35 @@ def _fit_response_model(dataframe, specification, cancel_check=None):
     random_seed = (time.time_ns() % (2 ** 32)
                    if configured_seed is None else int(configured_seed))
     rng = np.random.default_rng(random_seed)
-    candidates = [initial]
-    for _index in range(starts - 1):
+    candidates = []
+    minimum_rt = float(np.min(rt_values))
+    minimum_rt_by_response = (
+        {boundary: float(np.min(rt_values[mapped_responses == boundary]))
+         for boundary in observed_levels} if model == RATCLIFF_MODEL else None)
+    for _index in range(starts if free_parameters else 1):
         raise_if_fit_cancelled(cancel_check)
         candidate = None
-        for _attempt in range(1000):
-            sampled = np.asarray([rng.uniform(lower, upper) for lower, upper in bounds])
-            if _valid_parameter_combination(model, _parameter_values(specification, sampled)):
+        for _attempt in range(1000 if free_parameters else 1):
+            raise_if_fit_cancelled(cancel_check)
+            values = random_model_start(
+                model, specification['parameters'], minimum_rt, rng,
+                randomize_manual=_index > 0)
+            sampled = np.asarray([values[parameter['name']] for parameter in free_parameters])
+            if (all(lower <= value <= upper for value, (lower, upper) in zip(sampled, bounds))
+                    and _valid_parameter_combination(model, values)
+                    and initial_parameters_are_valid(
+                        model, values, minimum_rt, minimum_rt_by_response)):
                 candidate = sampled
                 break
-        candidates.append(initial.copy() if candidate is None else candidate)
+            if _index == 0 and not any(
+                    is_automatic_start(parameter) for parameter in free_parameters):
+                break
+        if candidate is not None:
+            candidates.append(candidate)
+    if not candidates:
+        raise ValueError(
+            'No starting point satisfies the parameter bounds, joint constraints and retained '
+            'RT time support. Check fixed values, starting values, bounds and Filter Data.')
     if free_parameters:
         constraint = {
             'type': 'ineq',
@@ -622,7 +647,10 @@ def _fit_response_model(dataframe, specification, cancel_check=None):
             })
                    for candidate in candidates]
         raise_if_fit_cancelled(cancel_check)
-        result = min(results, key=lambda candidate: candidate.fun if np.isfinite(candidate.fun) else np.inf)
+        successful = [candidate for candidate in results
+                      if candidate.success and np.isfinite(candidate.fun) and candidate.fun < 1e99]
+        result = min(successful or results,
+                     key=lambda candidate: candidate.fun if np.isfinite(candidate.fun) else np.inf)
     else:
         fixed_objective = objective(np.asarray([], dtype=float))
         result = OptimizeResult(
@@ -630,6 +658,10 @@ def _fit_response_model(dataframe, specification, cancel_check=None):
             success=np.isfinite(fixed_objective) and fixed_objective < 1e99,
             message='All parameters were fixed; likelihood evaluated without optimization.')
     final_values = _parameter_values(specification, result.x)
+    if not np.isfinite(result.fun) or result.fun >= 1e99:
+        raise ValueError(
+            'All optimizer runs failed to produce a valid likelihood. Check retained RTs, '
+            'parameter settings and Filter Data, or try more starting points.')
     parameter_names = [parameter['name'] for parameter in specification['parameters']]
     parameter_values = [final_values[name] for name in parameter_names]
     free_count = len(free_parameters)
@@ -671,6 +703,8 @@ def _fit_response_model(dataframe, specification, cancel_check=None):
         'fit_warnings': fit_warnings,
         'optimizer_method': 'SLSQP',
         'random_seed': random_seed,
+        'initialization': 'rtdists-inspired random starts; manual first-start values preserved',
+        'initial_parameters': [_parameter_values(specification, candidate) for candidate in candidates],
         'log_likelihood': log_likelihood,
         'aic': 2.0 * free_count - 2.0 * log_likelihood,
         'bic': math.log(rt_values.size) * free_count - 2.0 * log_likelihood,

@@ -89,6 +89,7 @@ class VariableCompute(QWidget):
         self._computation_source = None
         self._cancel_requested = False
         self._close_after_computation = False
+        self._close_on_success = True
         self._enabled_before_computation = []
 
         self.variable_list = None
@@ -98,7 +99,7 @@ class VariableCompute(QWidget):
         self.dataFrame = dataFrame
 
         self.setWindowTitle('Compute Variable')
-        self.setWindowIcon(Func.getImageObject("icon.png", type=1))
+        self.setWindowIcon(Func.getImageObject("common/icon.png", type=1))
         # self.setGeometry(100, 100, 800, 600)
         self.initUI()
         QApplication.instance().aboutToQuit.connect(self._finishBeforeApplicationQuit)
@@ -163,16 +164,20 @@ class VariableCompute(QWidget):
         button_layout = QHBoxLayout()
 
         ok_button = QPushButton('OK')
+        run_button = QPushButton('Run')
+        self.run_button = run_button
         reset_button = QPushButton('Reset')
         cancel_button = QPushButton('Cancel')
         self.cancel_button = cancel_button
 
         ok_button.clicked.connect(self.on_ok_button_click)
+        run_button.clicked.connect(self.on_run_button_click)
         reset_button.clicked.connect(self.on_reset_button_click)
         cancel_button.clicked.connect(self.on_cancel_button_click)
 
         button_layout.addWidget(reset_button)
         button_layout.addWidget(cancel_button)
+        button_layout.addWidget(run_button)
         button_layout.addWidget(ok_button)
 
         target_variable_layout = QHBoxLayout()
@@ -288,7 +293,15 @@ class VariableCompute(QWidget):
         self.target_input.clear()
         self.numeric_expression.clear()
 
+    def on_run_button_click(self):
+        """Calculate and commit a variable while keeping this window open."""
+        self._startComputation(close_on_success=False)
+
     def on_ok_button_click(self):
+        """Calculate and close the window only after successful commit."""
+        self._startComputation(close_on_success=True)
+
+    def _startComputation(self, close_on_success):
         """Validate the draft and start a worker without blocking the Qt event loop."""
         if self.computation_running:
             return
@@ -303,6 +316,7 @@ class VariableCompute(QWidget):
             self._computation_source = self.dataFrame
             self._cancel_requested = False
             self._close_after_computation = False
+            self._close_on_success = close_on_success
             thread = VariableComputeThread(name, source, self.dataFrame, self)
             self._computation_thread = thread
             thread.finished.connect(self._finishComputation)
@@ -381,7 +395,7 @@ class VariableCompute(QWidget):
             self._computation_source = None
             thread.deleteLater()
             self._setComputationRunning(False)
-            if successful or self._close_after_computation:
+            if (successful and self._close_on_success) or self._close_after_computation:
                 self.close()
             self.computationFinished.emit()
 

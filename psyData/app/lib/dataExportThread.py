@@ -4,6 +4,7 @@ import os
 import tempfile
 
 from PyQt5.QtCore import QThread
+from app.dataPreparation import write_psydata_stream
 
 
 class ExportCancelled(Exception):
@@ -58,7 +59,10 @@ class DataExportThread(QThread):
             with os.fdopen(descriptor, 'w', encoding='utf-8', newline='') as stream:
                 writer = _InterruptibleWriter(stream, self._check_cancelled)
                 chunk_rows = max(1, min(65536, 100000 // max(1, len(self.dataframe.columns))))
-                self.dataframe.to_csv(writer, chunksize=chunk_rows, **self.csv_options)
+                if os.path.splitext(self.file_path)[1].lower() == '.psydata':
+                    write_psydata_stream(self.dataframe, writer, chunk_rows, self._check_cancelled)
+                else:
+                    self.dataframe.to_csv(writer, chunksize=chunk_rows, **self.csv_options)
             self._check_cancelled()
             os.replace(temporary_path, self.file_path)
             temporary_path = None

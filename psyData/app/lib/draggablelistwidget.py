@@ -2,7 +2,7 @@ from PyQt5.QtWidgets import (
     QApplication, QListWidget, QMessageBox, QComboBox, QHBoxLayout, QMenu,
     QWidget, QAbstractItemView,
 )
-from PyQt5.QtCore import pyqtSignal, Qt, QTimer
+from PyQt5.QtCore import pyqtSignal, Qt, QTimer, QEvent
 from PyQt5 import sip
 
 from app.lib import MessageBox
@@ -39,6 +39,35 @@ DATA_OPERATIONS = [
 
 
 # for row and column variables
+class OperationComboBox(QComboBox):
+    """Notify the owning Data list when its temporary selector is dismissed."""
+
+    dismissed = pyqtSignal()
+
+    def showPopup(self):
+        """Watch the local popup itself, including Qt's internal auto-dismissal path."""
+        self.view().installEventFilter(self)
+        self.view().window().installEventFilter(self)
+        super().showPopup()
+
+    def eventFilter(self, watched, event):
+        """Notify dismissal when Qt hides its view without calling the Python hidePopup override."""
+        if event.type() == QEvent.Hide:
+            self.dismissed.emit()
+        return super().eventFilter(watched, event)
+
+    def hidePopup(self):
+        """Close the popup and defer owner cleanup until activation signals finish."""
+        super().hidePopup()
+        self.dismissed.emit()
+
+    def focusOutEvent(self, event):
+        """Dismiss a closed selector on genuine focus loss, not focus transfer to its popup."""
+        super().focusOutEvent(event)
+        if event.reason() != Qt.PopupFocusReason and not self.view().isVisible():
+            self.dismissed.emit()
+
+
 class DraggableListWidget(ListWidget):
     contentList = []
     RowType, ColumnType, DataType, VariableType = range(4)
@@ -222,7 +251,7 @@ class DraggableListWidget(ListWidget):
             return
 
         self._clear_operation_selector()
-        self.combo_box = QComboBox()
+        self.combo_box = OperationComboBox()
         self.combo_box.addItems(operations)
         self.itemLabel = item
         item_widget = QWidget()
@@ -233,9 +262,20 @@ class DraggableListWidget(ListWidget):
         self.setItemWidget(item, item_widget)
         self.combo_box.setMaximumWidth(int(item_widget.sizeHint().width() * 0.88))
         self.combo_box.activated[str].connect(self.confirmBox)
+        combo_box = self.combo_box
+        combo_box.dismissed.connect(lambda: QTimer.singleShot(
+            0, lambda: self._finish_selector_dismissal(combo_box)))
         self.combo_box.setFocus(Qt.MouseFocusReason)
         combo_box = self.combo_box
         QTimer.singleShot(0, lambda: self._show_operation_popup(combo_box))
+
+    def _finish_selector_dismissal(self, combo_box):
+        """Restore the original item unless this selector was replaced or reopened."""
+        if (sip.isdeleted(self) or self.combo_box is not combo_box
+                or sip.isdeleted(combo_box)):
+            return
+        if not combo_box.view().isVisible():
+            self._clear_operation_selector()
 
     def _show_operation_popup(self, combo_box):
         """Open a queued selector popup only while its Qt object remains current."""

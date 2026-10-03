@@ -248,6 +248,7 @@ class PivotedDataWidget(QWidget):
             distribution, parent=self)
 
         self.fit_dist_thread.fitStatus.connect(self.handleFitStatus)
+        self.fit_dist_thread.conditionProgress.connect(self._conditionFitProgress)
         self.fit_dist_thread.finished.connect(self.handleFitFinished)
         self.fit_dist_thread.cancelled.connect(self.handleFitCancelled)
 
@@ -259,6 +260,7 @@ class PivotedDataWidget(QWidget):
             dataFrame, specification, row_vars, col_vars, parent=self,
             validation_receipt=self._prepared_analysis.validation_receipts.get(self._target_index))
         self.fit_dist_thread.fitStatus.connect(self.handleFitStatus)
+        self.fit_dist_thread.conditionProgress.connect(self._conditionFitProgress)
         self.fit_dist_thread.finished.connect(self.handleFitFinished)
         self.fit_dist_thread.cancelled.connect(self.handleFitCancelled)
         self.fit_dist_thread.start()
@@ -373,6 +375,14 @@ class PivotedDataWidget(QWidget):
         return pd.pivot_table(
             dataframe, index=self._row_vars, columns=self._col_vars,
             values=target_var_name, aggfunc=aggregate)
+
+    def _conditionFitProgress(self, current, total):
+        """Forward sparse group progress only from the currently active worker."""
+        if self.sender() is self.fit_dist_thread and not self._cancel_requested:
+            self.analysisProgress.emit(
+                self._fit_started_count, self._fit_target_count,
+                f'{self._active_fit_label} · Condition {current} of {total}')
+
 
     def _startModelFit(self, target_var_name, operation, specification):
         """Start one model worker and return immediately to the Qt event loop."""
