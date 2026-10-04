@@ -113,7 +113,7 @@ class FitRTsDistThread(QThread):
 
         # Perform estimation (with or without grouping)
         fit_records = []
-        groups = prepared_frame.groupby(group_vars) if group_vars else None
+        groups = prepared_frame.groupby(group_vars, observed=True) if group_vars else None
         total_groups = groups.ngroups if groups is not None else 1
         current_group = 0
 

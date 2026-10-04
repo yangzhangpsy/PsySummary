@@ -41,6 +41,12 @@ def write_psydata_stream(frame, stream, chunk_rows=65536, check_cancelled=None):
         if kind is None:
             raise ValueError(f'Cannot preserve psydata column {name!r} with dtype {dtype}.')
         entry = {'name': name, 'dtype': str(dtype), 'kind': kind}
+        if isinstance(dtype, pd.StringDtype):
+            # Keep v1 files readable by older PsySummary readers, which accept
+            # 'string' but not pandas 3's inferred 'str' alias.
+            entry['dtype'] = 'string'
+            if getattr(dtype, 'na_value', pd.NA) is not pd.NA:
+                entry['string_na'] = 'nan'
         if kind == 'category':
             entry.update(categories=[_psydata_scalar(value) for value in dtype.categories], ordered=dtype.ordered)
         columns.append(entry)
@@ -53,7 +59,10 @@ def write_psydata_stream(frame, stream, chunk_rows=65536, check_cancelled=None):
         for entry in columns:
             if entry['kind'] in ('json', 'category'):
                 name = entry['name']
-                chunk[name] = [json.dumps(_psydata_scalar(value), ensure_ascii=True) for value in chunk[name]]
+                text_column = entry['kind'] == 'json' and entry['dtype'] == 'string'
+                chunk[name] = [json.dumps(
+                    None if text_column and pd.isna(value) else _psydata_scalar(value),
+                    ensure_ascii=True) for value in chunk[name]]
         chunk.to_csv(stream, sep='|', quoting=csv.QUOTE_NONNUMERIC,
                      index=False, header=start == 0, na_rep='')
 
@@ -107,10 +116,27 @@ def read_psydata(path):
                         raise ValueError(f'Invalid category value in {name!r}.')
                     frame[name] = pd.Series(values, dtype=category)
                 else:
-                    if dtype not in ('object', 'string'):
+                    if dtype not in ('object', 'string', 'str'):
                         raise ValueError(f'Invalid textual dtype {dtype}.')
-                    if dtype == 'string' and not all(value is None or isinstance(value, str) for value in values):
-                        raise ValueError(f'Invalid Text data in {name!r}.')
+                    if dtype != 'object':
+                        missing_kind = entry.get('string_na', 'nan' if dtype == 'str' else 'NA')
+                        if missing_kind not in ('NA', 'nan'):
+                            raise ValueError(f'Invalid Text missing-value type in {name!r}.')
+                        # Older pandas-3 writers used JSON NaN rather than null.
+                        def is_text_missing(value):
+                            return value is None or (missing_kind == 'nan' and
+                                                     isinstance(value, float) and np.isnan(value))
+                        if not all(isinstance(value, str) or is_text_missing(value) for value in values):
+                            raise ValueError(f'Invalid Text data in {name!r}.')
+                        if missing_kind == 'nan':
+                            values = [np.nan if is_text_missing(value) else value for value in values]
+                            try:
+                                dtype = pd.StringDtype(na_value=np.nan)
+                            except TypeError:
+                                # pandas < 2.3 cannot represent NaN-backed strings.
+                                dtype = object
+                        else:
+                            dtype = pd.StringDtype()
                     frame[name] = pd.Series(values, dtype=dtype)
             elif kind in ('numeric', 'boolean'):
                 parsed_dtype = pd.api.types.pandas_dtype(dtype)

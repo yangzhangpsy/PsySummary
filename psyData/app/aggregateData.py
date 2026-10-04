@@ -349,7 +349,7 @@ def groupby_to_pivot_tables(grouped_result, index_var=None, columns_var=None):
                 index=None,
                 columns=columns_var,
                 values=col,
-                aggfunc='first'
+                aggfunc='first', observed=True
             )
         elif index_var and not columns_var:
             # Only index variable specified
@@ -358,7 +358,7 @@ def groupby_to_pivot_tables(grouped_result, index_var=None, columns_var=None):
                 index=index_var,
                 columns=None,
                 values=col,
-                aggfunc='first'
+                aggfunc='first', observed=True
             )
         else:
             # Return original column data
@@ -628,55 +628,56 @@ class AggregateData(object):
                 if len(row_vars) == 0 and len(col_vars) == 0:
                     result = tmpDataFrame[target_var_name].mean(skipna=True)
                 else:
-                    result = pd.pivot_table(tmpDataFrame, index=row_vars, columns=col_vars, values=target_var_name)
+                    result = pd.pivot_table(tmpDataFrame, index=row_vars, columns=col_vars, values=target_var_name,
+                                            observed=True)
             elif operation == 'Median':
                 if len(row_vars) == 0 and len(col_vars) == 0:
                     result = tmpDataFrame[target_var_name].median(skipna=True)
                 else:
                     result = pd.pivot_table(tmpDataFrame, index=row_vars, columns=col_vars, values=target_var_name,
-                                            aggfunc='median')
+                                            aggfunc='median', observed=True)
             elif operation == 'Mode':
                 if len(row_vars) == 0 and len(col_vars) == 0:
                     result = safe_mode(tmpDataFrame[target_var_name])
                 else:
                     result = pd.pivot_table(tmpDataFrame, index=row_vars, columns=col_vars, values=target_var_name,
-                                            aggfunc=safe_mode)
+                                            aggfunc=safe_mode, observed=True)
             elif operation == 'Count':
                 if len(row_vars) == 0 and len(col_vars) == 0:
                     result = tmpDataFrame[target_var_name].count()
                 else:
                     result = pd.pivot_table(tmpDataFrame, index=row_vars, columns=col_vars, values=target_var_name,
-                                            aggfunc='count')
+                                            aggfunc='count', observed=True)
             elif operation == 'Standard Deviation':
                 if len(row_vars) == 0 and len(col_vars) == 0:
                     result = tmpDataFrame[target_var_name].std(skipna=True, ddof=1)
                 else:
                     result = pd.pivot_table(tmpDataFrame, index=row_vars, columns=col_vars, values=target_var_name,
-                                            aggfunc='std')
+                                            aggfunc='std', observed=True)
             elif operation == 'Max':
                 if len(row_vars) == 0 and len(col_vars) == 0:
                     result = tmpDataFrame[target_var_name].max(skipna=True)
                 else:
                     result = pd.pivot_table(tmpDataFrame, index=row_vars, columns=col_vars, values=target_var_name,
-                                            aggfunc='max')
+                                            aggfunc='max', observed=True)
             elif operation == 'Min':
                 if len(row_vars) == 0 and len(col_vars) == 0:
                     result = tmpDataFrame[target_var_name].min(skipna=True)
                 else:
                     result = pd.pivot_table(tmpDataFrame, index=row_vars, columns=col_vars, values=target_var_name,
-                                            aggfunc='min')
+                                            aggfunc='min', observed=True)
             elif operation == 'Variance':
                 if len(row_vars) == 0 and len(col_vars) == 0:
                     result = tmpDataFrame[target_var_name].var(skipna=True, ddof=1)
                 else:
                     result = pd.pivot_table(tmpDataFrame, index=row_vars, columns=col_vars, values=target_var_name,
-                                            aggfunc='var')
+                                            aggfunc='var', observed=True)
             elif operation == 'Standard Error':
                 if len(row_vars) == 0 and len(col_vars) == 0:
                     result = getStandardError(tmpDataFrame[target_var_name])
                 else:
                     result = pd.pivot_table(tmpDataFrame, index=row_vars, columns=col_vars, values=target_var_name,
-                                            aggfunc=getStandardError)
+                                            aggfunc=getStandardError, observed=True)
             elif operation in self.fitMethods:
                 group_vars = row_vars + col_vars
                 parameter_names, _estimate_func = self.DISTRIBUTION_MAP[operation]
@@ -691,7 +692,7 @@ class AggregateData(object):
                 # Perform estimation (with or without grouping)
                 if group_vars:
                     # Grouped estimation
-                    grouped_result = tmpDataFrame.groupby(group_vars)[target_var_name].apply(estimate_func)
+                    grouped_result = tmpDataFrame.groupby(group_vars, observed=True)[target_var_name].apply(estimate_func)
                 else:
                     # Single estimation
                     grouped_result = pd.Series({'result': estimate_func(tmpDataFrame[target_var_name])})
@@ -722,7 +723,7 @@ class AggregateData(object):
                     grouped_values = {
                         group_key: fit_model_group(group_frame)
                         for group_key, group_frame in tmpDataFrame.groupby(
-                            group_vars, dropna=False, sort=False)
+                            group_vars, dropna=False, sort=False, observed=True)
                     }
                     grouped_result = pd.Series(grouped_values)
                     grouped_result.index.names = group_vars

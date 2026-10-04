@@ -531,7 +531,7 @@ def validate_model_data(specification, dataframe, group_vars=()):
             'Check Define Filters and reopen Model Settings to update the mapping.')
     if dataframe.empty:
         raise ValueError('No rows remain after applying the current filters.')
-    groups = dataframe.groupby(list(group_vars), dropna=False, sort=False) if group_vars else [((), dataframe)]
+    groups = dataframe.groupby(list(group_vars), dropna=False, sort=False, observed=True) if group_vars else [((), dataframe)]
     for key, frame in groups:
         keys = key if isinstance(key, tuple) else (key,)
         label = ', '.join(f'{name}={value}' for name, value in zip(group_vars, keys)) or 'Overall'

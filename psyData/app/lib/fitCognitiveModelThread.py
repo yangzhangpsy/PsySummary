@@ -77,7 +77,7 @@ class FitCognitiveModelThread(QThread):
             raise ValueError(f"Required model variable(s) are missing: {', '.join(missing)}.")
         prepared = self.dataframe[required].copy()
         fit_records = []
-        grouped = prepared.groupby(group_vars, dropna=False, sort=False) if group_vars else None
+        grouped = prepared.groupby(group_vars, dropna=False, sort=False, observed=True) if group_vars else None
         total_groups = grouped.ngroups if grouped is not None else 1
         current_group = 0
 

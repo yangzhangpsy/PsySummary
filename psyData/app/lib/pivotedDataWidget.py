@@ -91,7 +91,7 @@ def groupby_to_pivot_tables(grouped_result, index_var=None, columns_var=None):
                 index=None,
                 columns=columns_var,
                 values=col,
-                aggfunc='first'
+                aggfunc='first', observed=True
             )
         elif index_var and not columns_var:
             # Only index variable specified
@@ -100,7 +100,7 @@ def groupby_to_pivot_tables(grouped_result, index_var=None, columns_var=None):
                 index=index_var,
                 columns=None,
                 values=col,
-                aggfunc='first'
+                aggfunc='first', observed=True
             )
         else:
             # Return original column data
@@ -374,7 +374,7 @@ class PivotedDataWidget(QWidget):
             return getattr(series, aggregate)(**options)
         return pd.pivot_table(
             dataframe, index=self._row_vars, columns=self._col_vars,
-            values=target_var_name, aggfunc=aggregate)
+            values=target_var_name, aggfunc=aggregate, observed=True)
 
     def _conditionFitProgress(self, current, total):
         """Forward sparse group progress only from the currently active worker."""
