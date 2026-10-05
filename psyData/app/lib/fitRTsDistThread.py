@@ -1,21 +1,16 @@
 import numpy as np
 import pandas as pd
-from PyQt5.QtCore import QThread, pyqtSignal
+from app.lib.fitProcess import IsolatedFitThread
 
 from app.rtDist import gamma_estimate_x, shifted_gamma_estimate_x, ex_wald_estimate_x, \
     wald_estimate_x, log_normal_estimate_x, shifted_log_normal_estimate_x, weibull_estimate_x, \
     shifted_weibull_estimate_x, ex_gaussian_estimate_x, inverse_gaussian_estimate_x, \
     shifted_inverse_gaussian_estimate_x, shift_wald_estimate_x, FIT_DIAGNOSTIC_NAMES, fit_rt_distribution
 from app.fitCancellation import FitCancelled, raise_if_fit_cancelled
+from app.diagnosticCurveCache import DiagnosticCurveCache, prepare_record_curves
 
 
-class FitRTsDistThread(QThread):
-    # Signals for reporting fitting status and results
-    # infoType, infoString, showTimeInfo or not
-    fitStatus = pyqtSignal(int, str, bool)
-    finished = pyqtSignal(object, list, list, list, object)
-    cancelled = pyqtSignal()
-    conditionProgress = pyqtSignal(int, int)
+class FitRTsDistThread(IsolatedFitThread):
 
     # Mapping of distribution names to their configurations
     # Structure: {Display Name: (Internal Name, Parameter Names, Estimation Function)}
@@ -35,7 +30,8 @@ class FitRTsDistThread(QThread):
             ['shape (k)', 'scale (θ)', 'shift'], shifted_log_normal_estimate_x)
     }
 
-    def __init__(self, dataFrame, operation, row_vars, col_vars, independentVarName, distribution, parent=None):
+    def __init__(self, dataFrame, operation, row_vars, col_vars, independentVarName, distribution, parent=None,
+                 curve_cache=None):
         """
         Initialize the fitting thread with necessary parameters.
 
@@ -55,8 +51,17 @@ class FitRTsDistThread(QThread):
         self.col_vars = col_vars
         self.independentVarName = independentVarName
         self.distribution = distribution
+        self.curve_cache = curve_cache if curve_cache is not None else DiagnosticCurveCache()
 
-    def run(self):
+    def _process_job(self):
+        """Transfer only grouping columns and the current target, never the whole source table."""
+        columns = list(dict.fromkeys(self.row_vars + self.col_vars + [self.independentVarName]))
+        return {'kind': 'distribution', 'frame': self.dataFrame.loc[:, columns],
+                'arguments': {'operation': self.operation, 'row_vars': self.row_vars,
+                              'col_vars': self.col_vars, 'independentVarName': self.independentVarName,
+                              'distribution': self.distribution}}
+
+    def _run_local(self):
         """
         Main thread execution method.
         Handles distribution fitting and error management.
@@ -70,7 +75,7 @@ class FitRTsDistThread(QThread):
         except Exception as e:
             # Emit error status if fitting fails
             self.fitStatus.emit(2, f'Fitting error: {str(e)}', True)
-            self.finished.emit(None, [], self.row_vars, self.col_vars, [])
+            self.resultReady.emit(None, [], self.row_vars, self.col_vars, [])
 
     def _process_distribution(self):
         """
@@ -96,7 +101,7 @@ class FitRTsDistThread(QThread):
         dist_key = self.distribution
         if dist_key not in self.DISTRIBUTION_MAP:
             self.fitStatus.emit(2, f'Invalid distribution parameter: {dist_key}.', True)
-            self.finished.emit(None, [], self.row_vars, self.col_vars, [])
+            self.resultReady.emit(None, [], self.row_vars, self.col_vars, [])
             return
 
         # Unpack distribution details
@@ -131,6 +136,13 @@ class FitRTsDistThread(QThread):
             fit['group_values'] = group_value if group_vars else ()
             fit['group_vars'] = list(group_vars)
             fit['result_prefix'] = f'{self.independentVarName}@{self.operation}'
+            self.curvePreparationProgress.emit(current_group, total_groups)
+            try:
+                prepare_record_curves(fit, self.curve_cache, cancel_check,
+                                      lambda text: self.fitStatus.emit(0, 'Warning: ' + text, False))
+            except InterruptedError as error:
+                raise FitCancelled(str(error)) from error
+            raise_if_fit_cancelled(cancel_check)
             fit_records.append(fit)
             diagnostics = [
                 fit['n_valid'],
@@ -169,7 +181,7 @@ class FitRTsDistThread(QThread):
 
         # Emit final results
         raise_if_fit_cancelled(cancel_check)
-        self.finished.emit(grouped_result, full_parameter_names, self.row_vars, self.col_vars, fit_records)
+        self.resultReady.emit(grouped_result, full_parameter_names, self.row_vars, self.col_vars, fit_records)
 
     def _prepare_fit_dataframe(self):
         required_columns = []

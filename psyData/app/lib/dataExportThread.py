@@ -1,10 +1,10 @@
-"""Background, atomic CSV/psydata writing without accessing GUI objects."""
+"""Background coordination of isolated, atomic CSV/psydata writing."""
 
 import os
-import tempfile
-
-from PyQt5.QtCore import QThread
-from app.dataPreparation import write_psydata_stream
+import threading
+from PyQt5.QtCore import QThread, pyqtSignal
+from app.lib.fitProcess import _write_packet
+from app.lib.writeProcess import run_write_process, stage_frame
 
 
 class ExportCancelled(Exception):
@@ -29,6 +29,8 @@ class _InterruptibleWriter:
 class DataExportThread(QThread):
     """Retain a read-only frame reference and publish only a complete export."""
 
+    stageChanged = pyqtSignal(str)
+
     def __init__(self, dataframe, file_path, csv_options, script_lines, parent=None):
         super().__init__(parent)
         self.dataframe = dataframe
@@ -39,6 +41,16 @@ class DataExportThread(QThread):
         self.error = ''
         self.cancelled = False
         self.succeeded = False
+        self.process_id = None
+        self._cancel = threading.Event()
+
+    def requestInterruption(self):
+        """Retain cancellation even if requested before start or during native completion."""
+        self._cancel.set()
+        super().requestInterruption()
+
+    def isInterruptionRequested(self):
+        return self._cancel.is_set()
 
     def _check_cancelled(self):
         """Stop at a safe write boundary instead of terminating the native thread."""
@@ -46,35 +58,18 @@ class DataExportThread(QThread):
             raise ExportCancelled()
 
     def run(self):
-        """Write beside the destination, close the stream, and atomically replace it."""
-        temporary_path = None
+        """Coordinate the isolated writer; publish only after it exits successfully."""
         try:
-            self._check_cancelled()
-            if os.path.lexists(self.file_path) and (
-                    os.path.islink(self.file_path) or not os.path.isfile(self.file_path)):
-                raise ValueError('Cannot replace a directory or symbolic link with exported data.')
-            descriptor, temporary_path = tempfile.mkstemp(
-                prefix='.psysummary-data-', suffix='.tmp',
-                dir=os.path.dirname(self.file_path))
-            with os.fdopen(descriptor, 'w', encoding='utf-8', newline='') as stream:
-                writer = _InterruptibleWriter(stream, self._check_cancelled)
-                chunk_rows = max(1, min(65536, 100000 // max(1, len(self.dataframe.columns))))
-                if os.path.splitext(self.file_path)[1].lower() == '.psydata':
-                    write_psydata_stream(self.dataframe, writer, chunk_rows, self._check_cancelled)
-                else:
-                    self.dataframe.to_csv(writer, chunksize=chunk_rows, **self.csv_options)
-            self._check_cancelled()
-            os.replace(temporary_path, self.file_path)
-            temporary_path = None
+            def prepare(directory, check):
+                _write_packet(directory / 'job.zip', {
+                    'kind': 'data', 'psydata': os.path.splitext(self.file_path)[1].lower() == '.psydata',
+                    'csv_options': self.csv_options}, check)
+                stage_frame(directory, self.dataframe, check)
+            run_write_process(self, self.file_path, prepare)
             self.succeeded = True
-        except ExportCancelled:
+        except (ExportCancelled, InterruptedError):
             self.cancelled = True
         except Exception as error:
             self.error = str(error)
         finally:
             self.dataframe = None
-            if temporary_path is not None:
-                try:
-                    os.unlink(temporary_path)
-                except OSError as error:
-                    self.error += f' Temporary file could not be removed: {temporary_path} ({error})'

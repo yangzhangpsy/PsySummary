@@ -11,6 +11,7 @@ from app.lib import MessageBox
 from app.psyDataFunc import PsyDataFunc
 from app.rtDist import CDF_pooling_main
 from app.lib.cdfPoolingWidget import fit_outlier_model, CdfPoolingWidget
+from app.fitCancellation import FitCancelled
 
 
 CONDITION_WISE_FILTER_REFERENCE = (
@@ -20,7 +21,7 @@ CONDITION_WISE_FILTER_REFERENCE = (
 )
 
 
-def warnConditionWiseFiltering(row_var_list, column_var_list, data_frame, rule_list):
+def warnConditionWiseFiltering(row_var_list, column_var_list, data_frame, rule_list, log=None):
     """Log a warning when active filters are combined with multiple observed data cells."""
     grouping_variables = list(dict.fromkeys(list(row_var_list) + list(column_var_list)))
     if not rule_list or not grouping_variables:
@@ -28,7 +29,7 @@ def warnConditionWiseFiltering(row_var_list, column_var_list, data_frame, rule_l
     combination_count = int(data_frame[grouping_variables].drop_duplicates().shape[0])
     if combination_count > 1:
         grouping_label = ' × '.join(grouping_variables)
-        PsyDataFunc.printOut(
+        (log or PsyDataFunc.printOut)(
             'Potential condition-wise filtering: The current Rows × Columns settings define '
             f'{combination_count} observed data cells ({grouping_label}) while filters are active. '
             'Any exclusion criterion estimated within these cells is applied separately by condition, '
@@ -271,14 +272,21 @@ class StatisticTool:
 
     @staticmethod
     def filterData(row_var_list, column_var_list, dataFrame, ruleList,
-                   record_script=True, script_collector=None):
+                   record_script=True, script_collector=None, *, log=None,
+                   cdf_decider=None, check_cancelled=None, progress=None):
+        check = check_cancelled or (lambda: None)
+        report = log or PsyDataFunc.printOut
+        check()
         StatisticTool.checkEmptyNullValue(dataFrame, row_var_list, column_var_list)
 
         tmp_data_frame = dataFrame.copy()
 
         be_printed_omega_str = ''
 
-        for rule in ruleList:
+        for rule_number, rule in enumerate(ruleList, 1):
+            check()
+            if progress:
+                progress(f'Applying filter {rule_number} of {len(ruleList)}…')
             variable_name, conditional_expression = split_filter_rule(rule)
 
             if 'Pooling CDF' != conditional_expression:
@@ -313,20 +321,26 @@ class StatisticTool:
                 omega_value = -1
                 try:
                     tmp_data_frame = CDF_pooling_main(tmp_data_frame, row_var_list, column_var_list, variable_name)
+                except (InterruptedError, FitCancelled):
+                    raise
                 except Exception as e:
-                    PsyDataFunc.printOut(f"Failed to fit the data. The 'Pooling CDF' filter will be skipped. detailed Error: {e}", 4)
+                    report(f"Failed to fit the data. The 'Pooling CDF' filter will be skipped. detailed Error: {e}", 4)
                 else:
+                    check()
                     po_hat, omega_value = fit_outlier_model(tmp_data_frame[f"{variable_name}_cdf"])
+                    check()
 
                     if omega_value:
-                        cdfPoolingDialog = CdfPoolingWidget(tmp_data_frame[f"{variable_name}_cdf"], po_hat, omega_value)
-
-                        cdfPoolingDialog.exec_()
-
-                        omega_value = cdfPoolingDialog.omega_hat
+                        if cdf_decider is None:
+                            cdfPoolingDialog = CdfPoolingWidget(tmp_data_frame[f"{variable_name}_cdf"], po_hat, omega_value)
+                            cdfPoolingDialog.exec_()
+                            omega_value = cdfPoolingDialog.omega_hat
+                        else:
+                            omega_value = cdf_decider(tmp_data_frame[f"{variable_name}_cdf"], po_hat, omega_value)
+                        check()
 
                         if omega_value == -1:
-                            PsyDataFunc.printOut(
+                            report(
                                 f"Aborted CDF pooling. The 'Pooling CDF' filter will be skipped, "
                                 f"and no changes will be made to the data.", 4)
                         else:
@@ -334,7 +348,7 @@ class StatisticTool:
                             filtered_df = tmp_data_frame[tmp_data_frame[f"{variable_name}_cdf"] <= omega_value]
                             tmp_data_frame = filtered_df
                     else:
-                        PsyDataFunc.printOut(
+                        report(
                             f"Failed to fit the CDF data. The 'Pooling CDF' filter will be skipped, "
                             f"and no changes will be made to the data.", 4)
 
@@ -350,6 +364,7 @@ class StatisticTool:
                 filtered_df = tmp_data_frame[tmp_data_frame[variable_name].isin(data)]
                 tmp_data_frame = filtered_df
 
+        check()
         if record_script:
             script_line = f'cdfPoolingOmegas = [{be_printed_omega_str[:-2]}]'
             if script_collector is not None:

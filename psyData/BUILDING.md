@@ -27,3 +27,21 @@ Like PsyBuilder, signed builds use `entitlements.plist`. The script checks the
 identity before building and verifies the resulting app signature before creating
 the DMG. Signing or verification failure stops the release. This does not perform
 Apple notarization; notarization and Gatekeeper testing remain separate steps.
+
+## PsySummary background workers
+
+The source and frozen entry point dispatches `--psysummary-fit-worker` and
+`--psysummary-write-worker` before importing GUI widgets. Keep this dispatch and
+the worker guard in `app/lib/__init__.py` when changing the launcher. Fits and
+diagnostic-curve preparation, data exports, and result saves use owned child
+processes; loading and analysis preparation use background threads.
+
+Run the regression tests from the repository root with the application's Python:
+
+```sh
+QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
+These tests exercise source-mode child processes and Qt lifecycle handling. They
+do not replace testing fitting, export, cancellation, and shutdown in the frozen
+application on each supported operating system.

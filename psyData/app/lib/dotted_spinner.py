@@ -9,6 +9,11 @@ FRAME_COUNT = 24
 FRAME_INTERVAL_MS = 50
 
 
+def elapsed_spinner_frame(elapsed_ms, interval_ms=FRAME_INTERVAL_MS, origin=0, direction=1):
+    """Keep the animation phase tied to elapsed time rather than delivered timer ticks."""
+    return (origin + direction * elapsed_ms / interval_ms) % FRAME_COUNT
+
+
 def paint_dotted_spinner(painter, center, color, frame):
     """Draw fixed dots with a clockwise wave of shrinking size and opacity."""
     phase = (frame % FRAME_COUNT) / FRAME_COUNT

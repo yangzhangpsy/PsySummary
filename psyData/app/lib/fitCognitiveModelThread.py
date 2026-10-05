@@ -3,10 +3,11 @@
 import numpy as np
 import pandas as pd
 from copy import deepcopy
-from PyQt5.QtCore import QThread, pyqtSignal
+from app.lib.fitProcess import IsolatedFitThread
 
 from app.cognitiveModels import fit_cognitive_model
 from app.fitCancellation import FitCancelled, raise_if_fit_cancelled
+from app.diagnosticCurveCache import DiagnosticCurveCache, prepare_record_curves
 from app.cognitiveModelSpec import (
     ACCURACY_CODING, BOUNDARY_CODING_LABELS, RATCLIFF_MODEL, RESPONSE_CODING,
     cognitive_model_reference_text, validate_model_data, model_result_parameters,
@@ -19,16 +20,11 @@ COGNITIVE_DIAGNOSTIC_NAMES = [
 ]
 
 
-class FitCognitiveModelThread(QThread):
+class FitCognitiveModelThread(IsolatedFitThread):
     """Fit one structured model independently within each Rows/Columns group."""
 
-    fitStatus = pyqtSignal(int, str, bool)
-    finished = pyqtSignal(object, list, list, list, object)
-    cancelled = pyqtSignal()
-    conditionProgress = pyqtSignal(int, int)
-
     def __init__(self, dataframe, specification, row_vars, col_vars, parent=None,
-                 validation_receipt=None):
+                 validation_receipt=None, curve_cache=None):
         """Initialize the grouped cognitive-model worker."""
         super().__init__(parent)
         self.dataframe = dataframe
@@ -36,8 +32,18 @@ class FitCognitiveModelThread(QThread):
         self.row_vars = list(row_vars)
         self.col_vars = list(col_vars)
         self._validation_receipt = validation_receipt
+        self.curve_cache = curve_cache if curve_cache is not None else DiagnosticCurveCache()
 
-    def run(self):
+    def _process_job(self):
+        """Transfer only model/group columns; revalidate the reconstructed frame in the child."""
+        required = list(dict.fromkeys(self.row_vars + self.col_vars + [
+            self.specification['rt_variable'], self.specification['response_variable']]
+            + ([self.specification['accuracy_variable']] if self.specification.get('accuracy_variable') else [])))
+        return {'kind': 'cognitive', 'frame': self.dataframe.loc[:, required],
+                'arguments': {'specification': self.specification, 'row_vars': self.row_vars,
+                              'col_vars': self.col_vars}}
+
+    def _run_local(self):
         """Fit all groups and emit result arrays plus diagnostics records."""
         try:
             self._process_model()
@@ -45,7 +51,7 @@ class FitCognitiveModelThread(QThread):
             self.cancelled.emit()
         except Exception as error:
             self.fitStatus.emit(2, f'Cognitive model fitting error: {error}', True)
-            self.finished.emit(None, [], self.row_vars, self.col_vars, [])
+            self.resultReady.emit(None, [], self.row_vars, self.col_vars, [])
 
     def _process_model(self):
         """Prepare groups, fit each one, and emit table-ready results."""
@@ -95,6 +101,13 @@ class FitCognitiveModelThread(QThread):
             fit['result_prefix'] = f"{specification['rt_variable']}@{model}"
             fit['distribution'] = model
             fit['data'] = fit['rt']
+            self.curvePreparationProgress.emit(current_group, total_groups)
+            try:
+                prepare_record_curves(fit, self.curve_cache, cancel_check,
+                                      lambda text: self.fitStatus.emit(0, 'Warning: ' + text, False))
+            except InterruptedError as error:
+                raise FitCancelled(str(error)) from error
+            raise_if_fit_cancelled(cancel_check)
             fit_records.append(fit)
             group_label = 'Overall' if not group_vars else ', '.join(
                 f'{name}={value}' for name, value in zip(group_vars, group_values))
@@ -137,4 +150,4 @@ class FitCognitiveModelThread(QThread):
             diagnostic_names.insert(3, 'Accuracy rate')
         output_names = [f'{prefix} {name}' for name in parameter_labels + diagnostic_names]
         raise_if_fit_cancelled(cancel_check)
-        self.finished.emit(grouped_result, output_names, self.row_vars, self.col_vars, fit_records)
+        self.resultReady.emit(grouped_result, output_names, self.row_vars, self.col_vars, fit_records)

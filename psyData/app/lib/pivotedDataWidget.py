@@ -1,5 +1,7 @@
-from PyQt5.QtCore import QTimer, pyqtSignal
-from PyQt5.QtWidgets import QVBoxLayout, QWidget, QLabel, QPushButton, QApplication, QFileDialog, QHBoxLayout, QSpinBox
+from PyQt5.QtCore import QTimer, Qt, pyqtSignal
+from PyQt5.QtWidgets import QVBoxLayout, QWidget, QLabel, QPushButton, QApplication, QFileDialog, QHBoxLayout, QSpinBox, QMenu
+from datetime import datetime, timezone
+from pathlib import Path
 import pandas as pd
 import numpy as np
 from app.dataPreparation import prepare_summary_frame, safe_mode
@@ -14,6 +16,7 @@ from app.psyDataFunc import PsyDataFunc
 from app.tool import StatisticTool, FlashMessageBox, warnConditionWiseFiltering
 from app.lib.dataFrameTableWidget import ResultFrameTableWidget
 from app.lib.rtFitDiagnostics import RTFitDiagnosticsDialog
+from app.diagnosticCurveCache import DiagnosticCurveCache
 
 
 RT_FIT_METHODS = (
@@ -139,7 +142,9 @@ class ModelPreparationError(ValueError):
 class PreparedAnalysis:
     """Own one run's filtered frame, resolved settings, and validation receipts."""
 
-    def __init__(self, dataframe, row_vars, col_vars, target_vars, rule_list):
+    def __init__(self, dataframe, row_vars, col_vars, target_vars, rule_list, *,
+                 log=None, cdf_decider=None, check_cancelled=None, progress=None):
+        check = check_cancelled or (lambda: None)
         self.source = dataframe
         self.row_vars = list(row_vars)
         self.col_vars = list(col_vars)
@@ -150,21 +155,25 @@ class PreparedAnalysis:
         if self.rule_list:
             self.dataframe = StatisticTool.filterData(
                 self.row_vars, self.col_vars, dataframe, self.rule_list,
-                record_script=True, script_collector=self.filter_script_lines)
+                record_script=True, script_collector=self.filter_script_lines,
+                log=log, cdf_decider=cdf_decider, check_cancelled=check, progress=progress)
         else:
             StatisticTool.checkEmptyNullValue(dataframe, self.row_vars, self.col_vars)
             self.dataframe = dataframe
             self.filter_script_lines.append('cdfPoolingOmegas = []')
         if self.dataframe.empty:
             message = 'No data remain after applying the current filters. Analysis was skipped.'
-            PsyDataFunc.printOut(message, 4)
+            (log or PsyDataFunc.printOut)(message, 4)
             raise ValueError(message)
         problems = []
         for index, target in enumerate(self.target_vars):
+            check()
             variable, model, specification = split_target(target)
             if model not in COGNITIVE_MODEL_NAMES:
                 continue
             try:
+                if progress:
+                    progress(f'Validating model {index + 1} of {len(self.target_vars)}…')
                 if not specification:
                     raise ValueError('Open Model Settings to configure this model.')
                 self.validation_receipts[index] = ValidatedModelData(
@@ -174,6 +183,7 @@ class PreparedAnalysis:
         if problems:
             raise ModelPreparationError('\n\n'.join(problems))
         checkVariablesDuplication(self.row_vars, self.col_vars, self.target_vars)
+        check()
 
     def matches(self, source, row_vars, col_vars, target_vars, rule_list):
         """Reject preparation reuse for another source or a changed run configuration."""
@@ -205,9 +215,12 @@ class PivotedDataWidget(QWidget):
     analysisFailed = pyqtSignal(str)
     analysisCancelled = pyqtSignal()
     analysisProgress = pyqtSignal(int, int, str)
+    analysisStage = pyqtSignal(str)
+    loadResultsRequested = pyqtSignal()
+    saveResultsRequested = pyqtSignal()
 
     def __init__(self, dataframe, row_vars, col_vars, target_vars, ruleList, parent=None,
-                 prepared_analysis=None):
+                 prepared_analysis=None, snapshot=None):
         super(PivotedDataWidget, self).__init__(parent)
         self.fit_dist_thread = None
         self.table = None
@@ -218,11 +231,32 @@ class PivotedDataWidget(QWidget):
         self.result_frame_var_names = []
         self.fit_error_message = None
         self.fit_records = []
+        self._curve_cache = DiagnosticCurveCache()
         self.fit_diagnostics_dialog = None
         self.fitMethods = list(RT_FIT_METHODS)
         self.cognitiveFitMethods = list(COGNITIVE_MODEL_NAMES)
         self._row_vars = list(row_vars)
         self._col_vars = list(col_vars)
+        self._loaded_snapshot = snapshot
+        self._result_metadata = (dict(snapshot.get('metadata', {})) if snapshot is not None else {
+            'created_at': datetime.now(timezone.utc).isoformat(),
+            'software_version': QApplication.applicationVersion() or 'unreported (source build)',
+            'pandas_version': pd.__version__, 'numpy_version': np.__version__})
+        if snapshot is not None:
+            # A historical result must never enter preparation, script recording or fitting.
+            self._prepared_analysis = None
+            self._target_vars = snapshot['targets']
+            self._target_index = len(self._target_vars)
+            self._fit_started_count = self._fit_target_count = 0
+            self._active_fit_label = None
+            self._analysis_complete = True
+            self._cancel_requested = False
+            self._tmp_dataframe = None
+            self.resultList = snapshot['results']
+            self.result_frame_var_names = snapshot['labels']
+            self.fit_records = snapshot['fit_records']
+            self.initUI(None, row_vars, col_vars, self._target_vars)
+            return
         if prepared_analysis is None:
             prepared_analysis = PreparedAnalysis(dataframe, row_vars, col_vars, target_vars, ruleList)
         elif not (isinstance(prepared_analysis, PreparedAnalysis)
@@ -245,11 +279,12 @@ class PivotedDataWidget(QWidget):
                             distribution='Ex-Gaussian'):
         self.fit_dist_thread = FitRTsDistThread(
             dataFrame, operation, row_vars, col_vars, independentVarName,
-            distribution, parent=self)
+            distribution, parent=self, curve_cache=self._curve_cache)
 
         self.fit_dist_thread.fitStatus.connect(self.handleFitStatus)
         self.fit_dist_thread.conditionProgress.connect(self._conditionFitProgress)
-        self.fit_dist_thread.finished.connect(self.handleFitFinished)
+        self.fit_dist_thread.curvePreparationProgress.connect(self._curvePreparationProgress)
+        self.fit_dist_thread.resultReady.connect(self.handleFitFinished)
         self.fit_dist_thread.cancelled.connect(self.handleFitCancelled)
 
         self.fit_dist_thread.start()
@@ -258,10 +293,12 @@ class PivotedDataWidget(QWidget):
         """Start one grouped cognitive-model fitting worker."""
         self.fit_dist_thread = FitCognitiveModelThread(
             dataFrame, specification, row_vars, col_vars, parent=self,
-            validation_receipt=self._prepared_analysis.validation_receipts.get(self._target_index))
+            validation_receipt=self._prepared_analysis.validation_receipts.get(self._target_index),
+            curve_cache=self._curve_cache)
         self.fit_dist_thread.fitStatus.connect(self.handleFitStatus)
         self.fit_dist_thread.conditionProgress.connect(self._conditionFitProgress)
-        self.fit_dist_thread.finished.connect(self.handleFitFinished)
+        self.fit_dist_thread.curvePreparationProgress.connect(self._curvePreparationProgress)
+        self.fit_dist_thread.resultReady.connect(self.handleFitFinished)
         self.fit_dist_thread.cancelled.connect(self.handleFitCancelled)
         self.fit_dist_thread.start()
 
@@ -270,14 +307,22 @@ class PivotedDataWidget(QWidget):
         self.setWindowTitle("Aggregation Results")
         self.resize(400, 700)
 
-        self.all_layout = QVBoxLayout()
-        self.btns_layout = QHBoxLayout()
+        self.all_layout = QVBoxLayout(self)
+        self.results_content = QWidget(self)
+        self.content_layout = QVBoxLayout(self.results_content)
+        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.results_footer = QWidget(self)
+        self.btns_layout = QHBoxLayout(self.results_footer)
+        self.btns_layout.setContentsMargins(0, 0, 0, 0)
 
-        self.clipboard_button = QPushButton('Clipboard')
-        self.export_button = QPushButton('Export')
+        self.clipboard_button = QPushButton('Clipboard', self.results_footer)
+        self.export_button = QPushButton('Export', self.results_footer)
+        self.load_results_button = QPushButton('Load Results…', self.results_footer)
+        self.load_results_button.setToolTip('Open a saved .psyresult without changing the current data or setup.')
+        self.load_results_button.clicked.connect(lambda _checked=False: self.loadResultsRequested.emit())
 
         # Create a QSpinBox for controlling decimal places
-        self.decimal_spin_box = QSpinBox()
+        self.decimal_spin_box = QSpinBox(self.results_footer)
         self.decimal_spin_box.setRange(0, 12)
         self.decimal_spin_box.setValue(4)
         self.decimal_spin_box.setSuffix(" decimal places")
@@ -287,10 +332,14 @@ class PivotedDataWidget(QWidget):
         self.export_button.setFixedWidth(100)
 
         self.clipboard_button.clicked.connect(self.copyToClipboard)
-        self.export_button.clicked.connect(self.exportData)
+        export_menu = QMenu(self.export_button)
+        export_menu.addAction('Save Results (.psyresult)…', lambda _checked=False: self.saveResultsRequested.emit())
+        export_menu.addAction('Export Table (.txt)…', self.exportData)
+        self.export_button.setMenu(export_menu)
 
         self.btns_layout.addWidget(self.clipboard_button)
         self.btns_layout.addWidget(self.export_button)
+        self.btns_layout.addWidget(self.load_results_button)
         self.btns_layout.addWidget(self.decimal_spin_box)
         self.clipboard_button.setEnabled(False)
         self.export_button.setEnabled(False)
@@ -299,11 +348,31 @@ class PivotedDataWidget(QWidget):
         filters_Info = '\n'.join(self.ruleList)
 
         self.filterStr = filters_Info
-        self.all_layout.addWidget(QLabel(filters_Info))
-        self.setLayout(self.all_layout)
+        if self._loaded_snapshot is not None:
+            path = self._loaded_snapshot.get('_loaded_path', '')
+            label = QLabel('Loaded results: ' + Path(path).name)
+            label.setTextFormat(Qt.PlainText)
+            label.setWordWrap(True)
+            label.setToolTip(path + '\nSaved: ' + self._loaded_snapshot.get('saved_at', ''))
+            self.all_layout.addWidget(label)
+        filter_label = QLabel(filters_Info)
+        filter_label.setTextFormat(Qt.PlainText)
+        self.all_layout.addWidget(filter_label)
+        self.all_layout.addWidget(self.results_content, 1)
+        self.all_layout.addWidget(self.results_footer)
+
+        if self._loaded_snapshot is not None:
+            self.createResultTable(col_vars, row_vars)
+            self.decimal_spin_box.setValue(self._loaded_snapshot['decimals'])
+            self.update_table()
+            return
 
         try:
-            warnConditionWiseFiltering(row_vars, col_vars, dataframe, self.ruleList)
+            if hasattr(self._prepared_analysis, 'condition_logs'):
+                for message, kind in self._prepared_analysis.condition_logs:
+                    PsyDataFunc.printOut(message, kind)
+            else:
+                warnConditionWiseFiltering(row_vars, col_vars, dataframe, self.ruleList)
             generateScript(row_vars, col_vars, target_vars, self.ruleList,
                            self._prepared_analysis.filter_script_lines)
             if self._fit_target_count:
@@ -383,6 +452,13 @@ class PivotedDataWidget(QWidget):
                 self._fit_started_count, self._fit_target_count,
                 f'{self._active_fit_label} · Condition {current} of {total}')
 
+    def _curvePreparationProgress(self, current, total):
+        """Distinguish post-fit curve preparation from parameter optimization."""
+        if self.sender() is self.fit_dist_thread and not self._cancel_requested:
+            self._conditionFitProgress(current, total)
+            self.analysisStage.emit('Preparing diagnostic curves…')
+            handleFitThreadSignal(0, f'Preparing diagnostic curves: {self._active_fit_label} '
+                                 f'· Condition {current} of {total}…', False)
 
     def _startModelFit(self, target_var_name, operation, specification):
         """Start one model worker and return immediately to the Qt event loop."""
@@ -436,6 +512,7 @@ class PivotedDataWidget(QWidget):
             return
         self._analysis_complete = True
         handleFitThreadSignal(2, f'Model fitting failed: {message}', False)
+        self._curve_cache.close()
         self.analysisFailed.emit(message)
 
     def createResultTable(self, col_vars, row_vars):
@@ -443,11 +520,14 @@ class PivotedDataWidget(QWidget):
             self.resultList, col_vars, row_vars, self.result_frame_var_names, self.fit_records)
         self.table.fitRecordActivated.connect(self.showFitDiagnostics)
 
-        self.all_layout.addWidget(self.table)
-        self.all_layout.addLayout(self.btns_layout)
+        self.content_layout.addWidget(self.table)
         self.clipboard_button.setEnabled(True)
         self.export_button.setEnabled(True)
         self.decimal_spin_box.setEnabled(True)
+
+    def hasResults(self):
+        """Return whether a completed result table is available for publication."""
+        return self._analysis_complete and self.table is not None and bool(self.resultList)
 
     def handleFitFinished(self, result, target_var, row_vars, col_vars, fit_records):
         """Collect one worker result, then continue the asynchronous target queue."""
@@ -461,8 +541,6 @@ class PivotedDataWidget(QWidget):
                 self.fit_error_message = 'No valid fit results were generated for the current filters.'
 
         if worker is not None:
-            worker.quit()
-            worker.wait()
             worker.deleteLater()
         self.fit_dist_thread = None
 
@@ -499,8 +577,6 @@ class PivotedDataWidget(QWidget):
         """Clean up a cooperatively cancelled worker and cancel the full queue."""
         worker = self.fit_dist_thread
         if worker is not None:
-            worker.quit()
-            worker.wait()
             worker.deleteLater()
         self.fit_dist_thread = None
         self._finishCancellation()
@@ -510,6 +586,7 @@ class PivotedDataWidget(QWidget):
         if self._analysis_complete:
             return
         self._analysis_complete = True
+        self._curve_cache.close()
         self.analysisCancelled.emit()
 
     def showFitDiagnostics(self, selected_record=None):
@@ -545,6 +622,24 @@ class PivotedDataWidget(QWidget):
         if operation.startswith('Shifted ') and (numeric_values <= 0).any():
             raise ValueError(
                 f"{operation} requires strictly positive RT observations.")
+
+    @classmethod
+    def fromSnapshot(cls, snapshot, parent=None):
+        """Construct a read-only historical result without running an analysis."""
+        from app.resultArchive import validate_snapshot
+        validate_snapshot(snapshot)
+        return cls(None, snapshot['rows'], snapshot['columns'], snapshot['targets'], snapshot['rules'],
+                   parent=parent, snapshot=snapshot)
+
+    def resultSnapshot(self):
+        """Capture display settings and retain immutable result references for background saving."""
+        if not self._analysis_complete or not self.resultList:
+            raise ValueError('Wait for a complete result before saving.')
+        return {'results': self.resultList, 'labels': list(self.result_frame_var_names),
+                'rows': list(self._row_vars), 'columns': list(self._col_vars),
+                'targets': list(self._target_vars), 'rules': list(self.ruleList),
+                'fit_records': self.fit_records, 'decimals': self.decimal_spin_box.value(),
+                'metadata': dict(self._result_metadata)}
 
     def updateResultDataframe(self, result, target_var):
         if isinstance(target_var, list):

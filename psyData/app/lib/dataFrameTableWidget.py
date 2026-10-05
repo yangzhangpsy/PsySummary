@@ -7,6 +7,7 @@ from PyQt5.QtWidgets import QTableWidget, QTableWidgetItem, QVBoxLayout, QHBoxLa
 from PyQt5.QtCore import QAbstractTableModel, Qt, QModelIndex, pyqtSignal, QThread
 from app.lib import MessageBox
 from app.expression import validate_variable_name, convert_variable_type
+from app.typeConversion import TypeConversionRequest, prepare_type_conversion
 
 
 def variable_type(series):
@@ -30,15 +31,19 @@ class TypeConversionThread(QThread):
 
     def __init__(self, series, target):
         super().__init__(QApplication.instance())
-        self.original = series
+        self.settings = series.settings if isinstance(series, TypeConversionRequest) else None
+        self.original = series.series if isinstance(series, TypeConversionRequest) else series
         self.target = target
         self.result = None
+        self.plan = None
         self.error = None
         QApplication.instance().aboutToQuit.connect(self.wait)
 
     def run(self):
         try:
             self.result = convert_variable_type(self.original, self.target)
+            if self.settings is not None:
+                self.plan = prepare_type_conversion(self.original, self.result, self.target, self.settings)
         except Exception as error:
             self.error = str(error)
 
@@ -104,7 +109,7 @@ class DataFrameTableWidget(QMainWindow):
 
     def initUI(self):
         self.setWindowTitle('Data Viewer')
-        self.setWindowIcon(Func.getImageObject("common/icon.png", type=1))
+        self.setWindowIcon(Func.getImageObject("icon.png", type=1))
         self.setWindowFlag(Qt.WindowStaysOnTopHint)
         self.resize(800, 600)
 
@@ -214,6 +219,8 @@ class DataFrameTableWidget(QMainWindow):
                        f'All {len(worker.original)} rows were validated. This changes actual data, not only display.\n'
                        + ('Numeric conversion removes leading zeros and may change textual formatting.\n' if worker.target == 'Numeric' else '')
                        + '\n' + examples)
+            if worker.plan is not None and worker.plan.warnings:
+                message += '\n\n' + '\n'.join(worker.plan.warnings)
             if QMessageBox.question(self, 'Confirm Type Conversion', message, QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
                 return
             if self.type_callback:
@@ -228,6 +235,7 @@ class DataFrameTableWidget(QMainWindow):
             self.conversion_running = False
             self._conversion_worker = None
             worker.result = None
+            worker.plan = None
             self.tabs.setEnabled(True)
             self.setWindowTitle('Data Viewer')
 
@@ -274,7 +282,7 @@ class ResultFrameTableWidget(QTableWidget):
         self.fitValueLabels = {}
 
         self.setWindowTitle('Result View')
-        self.setWindowIcon(Func.getImageObject("common/icon.png", type=1))
+        self.setWindowIcon(Func.getImageObject("icon.png", type=1))
         self.setFocusPolicy(Qt.NoFocus)
         self.setSelectionMode(QAbstractItemView.NoSelection)
         self.setAlternatingRowColors(True)

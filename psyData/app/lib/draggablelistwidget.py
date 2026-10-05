@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from PyQt5.QtWidgets import (
     QApplication, QListWidget, QMessageBox, QComboBox, QHBoxLayout, QMenu,
     QWidget, QAbstractItemView,
@@ -80,6 +82,7 @@ class DraggableListWidget(ListWidget):
         self.combo_box = None
         self.model_dataframe = None
         self.filtered_data_provider = None
+        self.request_filtered_data = None
         self._pending_single_click_item = None
         self._last_mouse_button = Qt.NoButton
         self._single_click_timer = QTimer(self)
@@ -106,10 +109,11 @@ class DraggableListWidget(ListWidget):
         self.contentList.remove(item.text())
         super().removeItem(item)
 
-    def setModelContext(self, dataframe, filtered_data_provider=None):
-        """Provide source data and an optional current-filter data provider for model dialogs."""
+    def setModelContext(self, dataframe, filtered_data_provider=None, *, request_filtered_data=None):
+        """Supply a source and either an asynchronous request or legacy synchronous provider."""
         self.model_dataframe = dataframe
         self.filtered_data_provider = filtered_data_provider
+        self.request_filtered_data = request_filtered_data
 
     def modelSpecifications(self):
         """Return structured specifications keyed by their compact display text."""
@@ -179,10 +183,17 @@ class DraggableListWidget(ListWidget):
                     added_item = self.item(self.count() - 1)
                     operation = text.split('@', 1)[1] if '@' in text else ''
                     if self.list_type == self.DataType and is_cognitive_model(operation):
-                        if not self._configure_model_item(added_item, operation):
-                            self.takeItem(self.row(added_item))
-                            self.contentList.remove(text)
-                            continue
+                        # A rejected or failed asynchronous edit must not consume the dragged source.
+                        def finish_drop(accepted, added=added_item, source=source_Widget, original=item):
+                            if not accepted:
+                                if not sip.isdeleted(self) and not sip.isdeleted(added) and self.row(added) >= 0:
+                                    self.removeItem(added)
+                            elif (not sip.isdeleted(source) and not sip.isdeleted(original)
+                                  and source.row(original) >= 0
+                                  and source.list_type in [self.RowType, self.ColumnType, self.DataType]):
+                                source.removeItem(original)
+                        self._configure_model_item(added_item, operation, on_finished=finish_drop)
+                        continue
 
                     if source_Widget.list_type in [self.RowType, self.ColumnType, self.DataType]:
                         source_Widget.removeItem(item)
@@ -338,52 +349,87 @@ class DraggableListWidget(ListWidget):
     def confirmBox(self, text):
         try:
             item = self.itemLabel
-            prev_text = item.text()
             previous_specification = item.data(MODEL_SPEC_ROLE)
             self._clear_operation_selector()
             if is_cognitive_model(text):
-                if not self._configure_model_item(
-                        item, text,
-                        previous_specification if previous_specification
-                        and previous_specification.get('model') == text else None):
-                    return
+                def finish(accepted):
+                    if accepted:
+                        self._set_item_operation(item, text)
+                self._configure_model_item(
+                    item, text, previous_specification if previous_specification
+                    and previous_specification.get('model') == text else None, on_finished=finish)
+                return
             else:
                 item.setData(MODEL_SPEC_ROLE, None)
-            new_text = prev_text.split("@", 1)[0] + "@" + text
-            item.setText(new_text)
-            self.contentList.remove(prev_text)
-            self.contentList.append(new_text)
+            self._set_item_operation(item, text)
         except Exception as e:
             print(e)
 
-    def _configure_model_item(self, item, model, specification=None):
-        """Open model settings and attach accepted structured data to one item."""
+    def _set_item_operation(self, item, operation):
+        """Commit a display label only after its settings were accepted."""
+        previous = item.text()
+        item.setText(previous.split('@', 1)[0] + '@' + operation)
+        self.contentList = [self.item(index).text() for index in range(self.count())]
+
+    def _configure_model_item(self, item, model, specification=None, on_finished=None):
+        """Request filtered data, then edit on the GUI thread and commit only to the same item."""
+        finished = False
+        def finish(accepted):
+            nonlocal finished
+            if not finished:
+                finished = True
+                if on_finished is not None:
+                    on_finished(accepted)
+            return accepted
+
+        if sip.isdeleted(self) or item is None or sip.isdeleted(item) or self.row(item) < 0:
+            return finish(False)
+        self._single_click_timer.stop()
+        self._pending_single_click_item = None
+        self._clear_operation_selector()
         if self.model_dataframe is None or self.model_dataframe.empty:
             QMessageBox.warning(self, 'Model Settings', 'Load data before configuring a cognitive RT model.')
-            return False
-        dataframe = self.model_dataframe
-        if self.filtered_data_provider is not None:
-            try:
-                dataframe = self.filtered_data_provider()
-            except Exception as error:
-                QMessageBox.warning(
-                    self, 'Model Settings', f'Could not apply the current filters: {error}')
-                return False
-        if dataframe is None or dataframe.empty:
-            QMessageBox.warning(
-                self, 'Model Settings', 'No rows remain after applying the current filters.')
-            return False
-        rt_variable = item.text().split('@', 1)[0]
+            return finish(False)
+        source, previous_text = self.model_dataframe, item.text()
+        previous_specification = deepcopy(item.data(MODEL_SPEC_ROLE))
         if specification is None:
-            saved_specification = item.data(MODEL_SPEC_ROLE)
-            if saved_specification and saved_specification.get('model') == model:
-                specification = saved_specification
-        configured = edit_cognitive_model(
-            dataframe, model, rt_variable, specification, self)
-        if configured is None:
+            if previous_specification and previous_specification.get('model') == model:
+                specification = previous_specification
+        draft = deepcopy(specification)
+
+        def current():
+            return (not sip.isdeleted(self) and not sip.isdeleted(item) and self.row(item) >= 0
+                    and self.model_dataframe is source and item.text() == previous_text
+                    and item.data(MODEL_SPEC_ROLE) == previous_specification)
+
+        def ready(dataframe):
+            try:
+                if not current():
+                    return finish(False)
+                if dataframe is None or dataframe.empty:
+                    QMessageBox.warning(self, 'Model Settings', 'No rows remain after applying the current filters.')
+                    return finish(False)
+                configured = edit_cognitive_model(dataframe, model, previous_text.split('@', 1)[0], draft, self)
+                if configured is None or not current():
+                    return finish(False)
+                item.setData(MODEL_SPEC_ROLE, configured)
+                return finish(True)
+            except Exception:
+                finish(False)
+                raise
+
+        try:
+            if self.request_filtered_data is not None:
+                requested = self.request_filtered_data(ready, lambda: finish(False))
+                if not requested:
+                    finish(False)
+                return requested
+            dataframe = self.filtered_data_provider() if self.filtered_data_provider is not None else source
+            return ready(dataframe)
+        except Exception as error:
+            finish(False)
+            QMessageBox.warning(self, 'Model Settings', f'Could not open model settings: {error}')
             return False
-        item.setData(MODEL_SPEC_ROLE, configured)
-        return True
 
     def clear(self, clearContentList=True):
         self._single_click_timer.stop()

@@ -1,7 +1,25 @@
 # -*- coding: utf-8 -*-
+import sys
+
+if __name__ == "__main__":
+    # Dispatch owned workers before importing widgets, including in frozen builds.
+    import multiprocessing
+    multiprocessing.freeze_support()
+    if '--psysummary-write-worker' in sys.argv:
+        from app.lib.writeProcess import worker_main
+        offset = sys.argv.index('--psysummary-write-worker')
+        if len(sys.argv) != offset + 2:
+            raise SystemExit('Expected one PsySummary writing job directory.')
+        raise SystemExit(worker_main(sys.argv[offset + 1]))
+    if '--psysummary-fit-worker' in sys.argv:
+        from app.lib.fitProcess import worker_main
+        offset = sys.argv.index('--psysummary-fit-worker')
+        if len(sys.argv) != offset + 2:
+            raise SystemExit('Expected one PsySummary fitting job directory.')
+        raise SystemExit(worker_main(sys.argv[offset + 1]))
+
 import csv
 import ast
-import sys
 import traceback
 import re
 import os
@@ -28,12 +46,14 @@ from app.lib.draggablelistwidget import DraggableListWidget, MainFilterListWidge
 from app.lib.filterWindow import FilterWindow
 from app.lib.dataFrameTableWidget import DataFrameTableWidget
 from app.lib.dataExportThread import DataExportThread
+from app.lib.resultArchiveThread import ResultArchiveThread
+from app.lib.analysisPreparationThread import AnalysisPreparationThread
+from app.lib.cdfPoolingWidget import CdfPoolingWidget
 from app.lib.distributionPreview import DistributionPreviewDialog
 from app.lib.cognitiveModelDialog import confirm_short_rt_warning
-from app.cognitiveModelSpec import short_rt_summary
 from app.lib.modelFitOverlay import ModelFitOverlay
 from app.lib.pivotedDataWidget import (
-    MODEL_FIT_METHODS, PivotedDataWidget, PreparedAnalysis, ModelPreparationError,
+    MODEL_FIT_METHODS, PivotedDataWidget, ModelPreparationError,
 )
 from app.psyDataFunc import PsyDataFunc
 from app.psyDataInfo import PsyDataInfo
@@ -41,6 +61,7 @@ from app.lib.scriptDock import ScriptDock
 from app.tool import StatisticTool, FlashMessageBox
 from app.variableCompute import VariableCompute
 from app.expression import validate_variable_name, rename_expression_reference
+from app.typeConversion import TypeConversionRequest
 from app.output import Output
 from app.cognitiveModelSpec import (
     COGNITIVE_MODEL_NAMES, split_target,
@@ -62,6 +83,17 @@ class ResultsToggleButton(QToolButton):
         font.setPointSize(16)
         painter.setFont(font)
         painter.drawText(self.rect(), Qt.AlignCenter, self.text())
+
+
+class AggregationResultsDock(QDockWidget):
+    """Reject empty results before Qt can expand the host's dock layout."""
+
+    def setVisible(self, visible):
+        """Allow native show/toggle paths only when a completed table is attached."""
+        if visible:
+            content = self.widget()
+            visible = isinstance(content, PivotedDataWidget) and content.hasResults()
+        super().setVisible(visible)
 
 
 def setListWidgetData(widget, items):
@@ -171,10 +203,16 @@ class PsyData(QMainWindow):
         self.dataReadStart = False
         self.model_fit_running = False
         self._analysis_preparing = False
+        self._preparation_thread = None
+        self._preparation_cdf = None
+        QApplication.instance().aboutToQuit.connect(self._shutdownPreparation)
         self._closing_after_model_cancel = False
         self._closing_after_variable_compute = False
         self._data_export_thread = None
+        self._result_archive_thread = None
+        self._file_overlay_worker = None
         QApplication.instance().aboutToQuit.connect(self._shutdownDataExport)
+        QApplication.instance().aboutToQuit.connect(self._shutdownResultArchive)
         self._menu_enabled_before_model_fit = True
         self.is_windows = Info.OS_TYPE == 0
         self.files = None
@@ -210,6 +248,8 @@ class PsyData(QMainWindow):
         file_menu.addAction("View Data", self.showDataTable, QKeySequence(QKeySequence.WhatsThis))
         file_menu.addAction("Save Data", self.savePsyData, QKeySequence(QKeySequence.Save))
         file_menu.addAction("Save Filtered Data", self.saveFilteredData, QKeySequence(QKeySequence.SaveAs))
+        file_menu.addSeparator()
+        file_menu.addAction('Load Results…', self.loadResults)
         tool_menu.addAction("Transform Variable", self.computationVariable)
 
         """
@@ -221,7 +261,7 @@ class PsyData(QMainWindow):
 
         view_menu: QMenu = menubar.addMenu("&View")
 
-        self.results_dock = QDockWidget('Aggregation Results', self)
+        self.results_dock = AggregationResultsDock('Aggregation Results', self)
         self.results_dock.setObjectName('aggregationResultsDock')
         self.results_dock.setAllowedAreas(Qt.RightDockWidgetArea)
         self.results_dock.setFeatures(QDockWidget.DockWidgetClosable)
@@ -229,6 +269,7 @@ class PsyData(QMainWindow):
         self.setCorner(Qt.TopRightCorner, Qt.RightDockWidgetArea)
         self.setCorner(Qt.BottomRightCorner, Qt.RightDockWidgetArea)
         self.results_dock.hide()
+        self.results_dock.toggleViewAction().setEnabled(False)
         self.results_dock.visibilityChanged.connect(
             self._aggregationResultsVisibilityChanged)
         self.results_action = QAction('&Aggregation Results', self)
@@ -674,7 +715,6 @@ drag the variable back to the variable list.
             self._psydata_import_worker = None
             worker.deleteLater()
 
-
     def _dataImportBusy(self):
         """Keep source-dependent actions blocked until import cleanup has completed."""
         if (self.readMatThreads or self._psydata_import_worker is not None
@@ -807,29 +847,38 @@ drag the variable back to the variable list.
             self.variablesNameList = self.data.columns.tolist()
             self.variables_list.addItems(self.variablesNameList)
             self.variables_list.sortItems(Qt.AscendingOrder)
-            self.data_list.setModelContext(self.data, self.getFilteredDataFrame)
+            self.data_list.setModelContext(self.data, request_filtered_data=self._prepareModelSettings)
 
     # 显示打开文件的table
     def showDataTable(self):
-        if self._dataImportBusy():
+        if self._variableCalculationBusy('viewing filtered data'):
             return False
-        try:
-            if self.data is None:
-                MessageBox.information(self, 'Warning', "No data exist, please load the data first.")
-                return False
+        if self.model_fit_running:
+            self._showModelFitBusyMessage('viewing filtered data')
+            return False
+        if self.data is None:
+            MessageBox.information(self, 'Warning', "No data exist, please load the data first.")
+            return False
+        return self._startPreparation('view', self._publishPreparedDataView)
 
-            df = self.getFilteredDataFrame()
-            source = self.data
-            self.tableFrame = DataFrameTableWidget(
-                df, self, lambda old, new: self.renameVariable(old, new, source),
-                lambda name, target, worker, viewer: self.convertVariableType(name, target, source, worker, viewer))
-            self.tableFrame.source_frame = source
-            self.tableFrame.show()
-        except Exception as e:
-            MessageBox.warning(self, "Show Filtered Data Error", f"{e}")
-            return None
+    def _publishPreparedDataView(self, worker):
+        """Create the viewer on the GUI thread without repeating its filter operation."""
+        source = worker.source
+        self.tableFrame = DataFrameTableWidget(
+            worker.result, self, lambda old, new: self.renameVariable(old, new, source),
+            lambda name, target, job, viewer: self.convertVariableType(name, target, source, job, viewer))
+        self.tableFrame.source_frame = source
+        self.tableFrame.show()
 
-    # filter 触发事件
+    def _prepareModelSettings(self, ready, discarded):
+        """Prepare script-silent model-dialog data, keeping all widgets on the GUI thread."""
+        if self._variableCalculationBusy('opening model settings'):
+            return False
+        if self.model_fit_running:
+            self._showModelFitBusyMessage('opening model settings')
+            return False
+        return self._startPreparation('model-settings', lambda worker: ready(worker.result), discarded)
+
     def convertVariableType(self, name, target, source, worker, owner):
         """Validate dependencies, then atomically commit a confirmed full-source column conversion."""
         if self._variableCalculationBusy('converting a variable', exclude_viewer=owner):
@@ -838,43 +887,57 @@ drag the variable back to the variable list.
             raise ValueError('Please wait for model fitting to finish.')
         if source is not self.data or name not in source:
             raise ValueError('The source data changed. Reopen Data Viewer.')
-        references = []
-        for widget, label in ((self.rows_list, 'Rows'), (self.columns_list, 'Columns'),
-                              (self.data_list, 'Data'), (self.filter_list, 'Filters')):
-            for index in range(widget.count()):
-                item = widget.item(index)
-                text = item.text()
-                variable = text.partition('@')[0] if widget is self.data_list else text.partition(':')[0].strip() if widget is self.filter_list else text
-                specification = item.data(MODEL_SPEC_ROLE) if widget is self.data_list else None
-                if variable == name or (specification and any(specification.get(field) == name
-                        for field in ('rt_variable', 'response_variable', 'accuracy_variable'))):
-                    references.append(label)
-        if references:
-            raise ValueError('This variable is referenced by ' + ', '.join(sorted(set(references)))
-                             + '. Remove these references before changing its type, then reconfigure them.')
+        settings = {
+            'rows': getListWidgetData(self.rows_list),
+            'columns': getListWidgetData(self.columns_list),
+            'filters': self.getFilterList(),
+            'targets': deepcopy(getDataListEntries(self.data_list)),
+        }
         if worker is None:
-            return source[name]
+            return TypeConversionRequest(source[name], settings)
         if not source[name].equals(worker.original):
             raise ValueError('The source column changed during validation. No conversion was applied.')
+        if worker.settings != settings or worker.plan is None:
+            raise ValueError('The analysis settings changed during validation. Retry the conversion.')
+        plan = worker.plan
         previous_script = self.script_dock.text_edit.toPlainText()
         original = source[name]
         try:
             PsyDataFunc.genScript('from expression import convert_variable_type')
             PsyDataFunc.genScript(f'aggData.data[{name!r}] = convert_variable_type(aggData.data[{name!r}], {target!r}).array')
+            if plan.filters != settings['filters']:
+                PsyDataFunc.genScript(f'ruleList = {plan.filters!r}')
+            if plan.targets != settings['targets']:
+                PsyDataFunc.genScript(f'targetVariables = {plan.targets!r}')
             source[name] = worker.result.array
+            for index, rule in enumerate(plan.filters):
+                self.filter_list.item(index).setText(rule)
+            if hasattr(self.filter_list, 'contentList'):
+                self.filter_list.contentList = list(plan.filters)
+            for index, entry in enumerate(plan.targets):
+                specification = entry.get('model_specification') if isinstance(entry, dict) else None
+                self.data_list.item(index).setData(MODEL_SPEC_ROLE, specification)
             filtered = self.getFilteredDataFrame()
         except Exception:
             source[name] = original.array
+            for index, rule in enumerate(settings['filters']):
+                self.filter_list.item(index).setText(rule)
+            if hasattr(self.filter_list, 'contentList'):
+                self.filter_list.contentList = list(settings['filters'])
+            for index, entry in enumerate(settings['targets']):
+                specification = entry.get('model_specification') if isinstance(entry, dict) else None
+                self.data_list.item(index).setData(MODEL_SPEC_ROLE, specification)
             self.script_dock.text_edit.setPlainText(previous_script)
             raise
         for viewer in self.findChildren(DataFrameTableWidget):
             if getattr(viewer, 'source_frame', None) is source:
+                # Confirmed group changes can alter filtered rows and their index labels.
+                viewer.model.beginResetModel()
                 viewer.model._df = filtered
-                viewer.model.dataChanged.emit(viewer.model.index(0, 0), viewer.model.index(
-                    viewer.model.rowCount() - 1, viewer.model.columnCount() - 1))
+                viewer.model.endResetModel()
                 viewer.refreshVariables()
         self.computationVariableGui.updateData(source)
-        self.data_list.setModelContext(source, self.getFilteredDataFrame)
+        self.data_list.setModelContext(source, request_filtered_data=self._prepareModelSettings)
         if self.filterWindow is not None:
             self.filterWindow.close()
         if self.distributionPreviewWindow is not None:
@@ -882,7 +945,7 @@ drag the variable back to the variable list.
         self.printLogInfo(f'Variable type converted: {name} → {target}', 1)
         return True
 
-
+    # filter 触发事件
     def renameVariable(self, old_name, new_name, source):
         """Atomically rename a source column and current structured analysis references."""
         if self._variableCalculationBusy('renaming a variable'):
@@ -942,7 +1005,7 @@ drag the variable back to the variable list.
             compute.numeric_expression.setText(draft)
             if previous_target.strip() == old_name:
                 compute.target_input.setText(new_name)
-            self.data_list.setModelContext(self.data, self.getFilteredDataFrame)
+            self.data_list.setModelContext(self.data, request_filtered_data=self._prepareModelSettings)
         except Exception:
             for frame in frames.values():
                 frame.rename(columns={new_name: old_name}, inplace=True)
@@ -968,7 +1031,6 @@ drag the variable back to the variable list.
         self.printLogInfo(f'Variable renamed: {old_name} → {new_name}', 1)
         return True
 
-
     def defineFilterEvent(self):
         if self._variableCalculationBusy('defining filters'):
             return False
@@ -990,55 +1052,15 @@ drag the variable back to the variable list.
         if self.data is None or self.data.empty:
             MessageBox.information(self, 'Warning', 'No data exist, please load data first.')
             return False
-        try:
-            row_variables = getListWidgetData(self.rows_list)
-            column_variables = getListWidgetData(self.columns_list)
-            data_items = getListWidgetData(self.data_list)
-            target_variables = []
-            for item in data_items:
-                variable = item.split('@', 1)[0]
-                if (variable not in target_variables and variable in self.data.columns
-                        and pd.to_numeric(self.data[variable], errors='coerce').notna().any()):
-                    target_variables.append(variable)
-            if not target_variables:
-                MessageBox.information(
-                    self,
-                    'Warning',
-                    'No numeric Data variable is defined. Drag at least one numeric variable into '
-                    'the Data area before opening Distribution Preview.')
-                return False
+        return self._startPreparation('preview', self._publishPreparedPreview)
 
-            rules = self.getFilterList()
-            marker = '__psysummary_preview_row_id__'
-            while marker in self.data.columns:
-                marker += '_'
-
-            # Filtering needs only rule/group columns, not unrelated experiment data.
-            from app.dataPreparation import split_filter_rule
-            filter_columns = list(dict.fromkeys(
-                row_variables + column_variables + [split_filter_rule(rule)[0] for rule in rules]))
-            preview_source = self.data.loc[:, filter_columns].copy(deep=False)
-            preview_source[marker] = np.arange(len(preview_source), dtype=int)
-            retained_data = StatisticTool.filterData(
-                row_variables, column_variables, preview_source, rules,
-                record_script=False)
-            retained_mask = np.zeros(len(self.data), dtype=bool)
-            retained_mask[retained_data[marker].to_numpy(dtype=np.intp)] = True
-            del retained_data, preview_source
-
-            self.distributionPreviewWindow = DistributionPreviewDialog(
-                self.data,
-                retained_mask,
-                target_variables=target_variables,
-                row_facets=row_variables,
-                column_facets=column_variables,
-                parent=self,
-            )
-            self.distributionPreviewWindow.show()
-            return True
-        except Exception as error:
-            MessageBox.warning(self, 'Distribution Preview Error', str(error))
-            return False
+    def _publishPreparedPreview(self, worker):
+        result = worker.result
+        self.distributionPreviewWindow = DistributionPreviewDialog(
+            result['data'], result['mask'], target_variables=result['targets'],
+            row_facets=worker.settings['rows'], column_facets=worker.settings['columns'],
+            parent=self, prepared_data=True)
+        self.distributionPreviewWindow.show()
 
     # 运行分析程序
     def runSummary(self):
@@ -1051,38 +1073,18 @@ drag the variable back to the variable list.
             MessageBox.information(self, 'Warning', "No data exist, please load data first.")
             return None
 
+        if not getDataListEntries(self.data_list):
+            MessageBox.information(self, 'Warning', 'No Data variable is defined. Drag a variable into the Data area.')
+            return None
+        return self._startPreparation('run', self._publishPreparedRun)
+
+    def _publishPreparedRun(self, worker):
+        """Confirm warnings and hand off the already-filtered snapshot without repeating preparation."""
+        prepared = worker.result
+        if not confirm_short_rt_warning(self, worker.short_warnings):
+            return
+        contains_model_fit = any(split_target(target)[1] in MODEL_FIT_METHODS for target in prepared.target_vars)
         try:
-            self._analysis_preparing = True
-            rowList = getListWidgetData(self.rows_list)
-            columnList = getListWidgetData(self.columns_list)
-            dataList = getDataListEntries(self.data_list)
-
-            if not dataList:
-                MessageBox.information(
-                    self,
-                    'Warning',
-                    'No Data variable is defined. Drag at least one variable into the Data area '
-                    'before running Data Summary.')
-                return None
-
-            items = self.getFilterList()
-            contains_model_fit = any(
-                split_target(target)[1] in MODEL_FIT_METHODS
-                for target in dataList)
-
-            prepared = PreparedAnalysis(self.data, rowList, columnList, dataList, items)
-
-            short_rt_descriptions = []
-            for target in prepared.target_vars:
-                _variable, _model, specification = split_target(target)
-                if specification:
-                    description = short_rt_summary(
-                        specification, prepared.dataframe, prepared.row_vars + prepared.col_vars)
-                    if description:
-                        short_rt_descriptions.append(description)
-            if not confirm_short_rt_warning(self, short_rt_descriptions):
-                return None
-
             if contains_model_fit:
                 self.model_fit_running = True
                 self._startModelFitOverlay()
@@ -1101,11 +1103,9 @@ drag the variable back to the variable list.
                         lambda widget=result_widget: self._modelFitCancelled(widget))
                 if hasattr(result_widget, 'analysisProgress'):
                     result_widget.analysisProgress.connect(self._modelFitProgress)
+                    result_widget.analysisStage.connect(self._modelFitStage)
             else:
                 self._showAggregationResults(result_widget)
-        except ModelPreparationError as error:
-            MessageBox.warning(self, 'Invalid Model Settings', str(error))
-            return None
         except Exception as e:
             self.model_fit_running = False
             self._pending_result_widget = None
@@ -1113,8 +1113,117 @@ drag the variable back to the variable list.
             MessageBox.information(self, 'Warning', f"{e}")
             traceback.print_exc()
             return None
+
+    def _preparationSettings(self):
+        """Read small GUI settings on the GUI thread, never from a preparation worker."""
+        return {'rows': getListWidgetData(self.rows_list), 'columns': getListWidgetData(self.columns_list),
+                'targets': getDataListEntries(self.data_list), 'rules': self.getFilterList()}
+
+    def _startPreparation(self, purpose, completion, on_discard=None):
+        """Show busy feedback before scheduling read-only data preparation."""
+        if self._analysisPreparationBusy('starting another preparation'):
+            return False
+        worker = AnalysisPreparationThread(self.data, self._preparationSettings(), purpose, self)
+        self._preparation_thread = worker
+        self._preparation_completion = completion
+        self._preparation_discard = on_discard
+        self._analysis_preparing = True
+        worker.finished.connect(self._finishPreparation)
+        worker.progress.connect(self._preparationProgress)
+        worker.logMessage.connect(self._preparationLog)
+        worker.cdfRequested.connect(self._requestPreparationCDF)
+        self._startModelFitOverlay()
+        self.model_fit_overlay.setStage('Preparing data…')
+        try:
+            worker.start()
+        except Exception:
+            self._preparation_thread = None
+            self._preparation_completion = None
+            self._preparation_discard = None
+            self._analysis_preparing = False
+            self._stopModelFitOverlay()
+            worker.deleteLater()
+            raise
+        return True
+
+    def _preparationProgress(self, text):
+        if self.sender() is self._preparation_thread:
+            self.model_fit_overlay.setStage(text)
+
+    def _preparationLog(self, message, kind):
+        if self.sender() is self._preparation_thread and not self._closing:
+            PsyDataFunc.printOut(message, kind)
+
+    def _requestPreparationCDF(self, decision):
+        """Open the CDF dialog asynchronously; the worker waits on an event, not a GUI loop."""
+        worker = self.sender()
+        if worker is not self._preparation_thread or self._closing or worker.isInterruptionRequested():
+            decision.resolve(-1)
+            return
+        try:
+            dialog = CdfPoolingWidget(decision.values, decision.po, decision.omega)
+            dialog.setParent(self, Qt.Dialog)
+            dialog.setWindowModality(Qt.WindowModal)
+            self._preparation_cdf = dialog
+            def finish(_code):
+                decision.resolve(dialog.omega_hat)
+                if self._preparation_cdf is dialog:
+                    self._preparation_cdf = None
+                dialog.deleteLater()
+            dialog.finished.connect(finish)
+            dialog.open()
+        except Exception as error:
+            worker.requestInterruption()
+            decision.resolve(-1)
+            MessageBox.warning(self, 'CDF Preview Error', str(error))
+
+    def _finishPreparation(self):
+        """Publish only after native completion and reject stale settings/source snapshots."""
+        worker = self.sender()
+        if worker is not self._preparation_thread:
+            return
+        completion = self._preparation_completion
+        discarded = self._preparation_discard
+        published = False
+        self._preparation_thread = None
+        self._preparation_completion = None
+        self._preparation_discard = None
+        # A run/export can immediately hand off to another worker. Preserve the visual
+        # deadline and any already-visible feedback across that one logical operation.
+        if worker.purpose not in ('run', 'export'):
+            self._stopModelFitOverlay()
+        try:
+            if self._closing or worker.cancelled:
+                return
+            if worker.error is not None:
+                raise worker.error
+            if worker.source is not self.data or worker.settings != self._preparationSettings():
+                raise ValueError('Data or settings changed during preparation. Please run the operation again.')
+            completion(worker)
+            published = True
+        except Exception as error:
+            title = 'Invalid Model Settings' if isinstance(error, ModelPreparationError) else 'Data Preparation Error'
+            self._stopModelFitOverlay()
+            MessageBox.warning(self, title, str(error))
         finally:
             self._analysis_preparing = False
+            if not self.model_fit_running and self._file_overlay_worker is None:
+                self._stopModelFitOverlay()
+            worker.result = None
+            worker.source = None
+            worker.deleteLater()
+            if not published and discarded is not None:
+                discarded()
+
+    def _shutdownPreparation(self):
+        """Cancel a pending CDF decision and join only during final application shutdown."""
+        self._closing = True
+        worker = self._preparation_thread
+        if worker is not None:
+            worker.requestInterruption()
+            if self._preparation_cdf is not None:
+                self._preparation_cdf.close()
+            worker.wait()
 
     def _showModelFitBusyMessage(self, action='starting another analysis'):
         """Show the active-fit notice at a stable two-line width."""
@@ -1130,16 +1239,22 @@ drag the variable back to the variable list.
         self._model_fit_message_box = dialog
         dialog.exec_()
 
-    def _startModelFitOverlay(self):
-        """Cover PsySummary with a localized spinner while a model queue runs."""
-        self._menu_enabled_before_model_fit = self.menuBar().isEnabled()
+    def _startModelFitOverlay(self, message='Preparing model fitting…', detail=''):
+        """Cover PsySummary with the shared localized spinner for a background task."""
+        if self.model_fit_overlay.isHidden():
+            self._menu_enabled_before_model_fit = self.menuBar().isEnabled()
         self.menuBar().setEnabled(False)
-        self.model_fit_overlay.start()
+        self.model_fit_overlay.start(message, detail)
 
     def _modelFitProgress(self, current, total, label):
         """Update the overlay only when the fitting queue starts another model."""
         if self.model_fit_running:
             self.model_fit_overlay.setProgress(current, total, label)
+
+    def _modelFitStage(self, message):
+        """Show post-fit numerical preparation without claiming optimization is still running."""
+        if self.model_fit_running:
+            self.model_fit_overlay.setStage(message)
 
     def _stopModelFitOverlay(self):
         """Restore normal interaction after a model queue reaches a terminal state."""
@@ -1184,6 +1299,8 @@ drag the variable back to the variable list.
 
     def _showAggregationResults(self, result_widget):
         """Replace and reveal the fixed right-side aggregation-results dock."""
+        if not result_widget.hasResults():
+            raise ValueError('Aggregation Results requires a completed result table.')
         previous_widget = self.results_dock.widget()
         if previous_widget is not None and previous_widget is not result_widget:
             diagnostics = getattr(previous_widget, 'fit_diagnostics_dialog', None)
@@ -1192,6 +1309,10 @@ drag the variable back to the variable list.
             previous_widget.setParent(None)
             previous_widget.deleteLater()
 
+        if not getattr(result_widget, '_archive_actions_connected', False):
+            result_widget.loadResultsRequested.connect(self.loadResults)
+            result_widget.saveResultsRequested.connect(lambda: self.saveResults(result_widget))
+            result_widget._archive_actions_connected = True
         self.pivotTableWindow = result_widget
         self.results_dock.setWidget(result_widget)
         self.results_action.setEnabled(True)
@@ -1202,11 +1323,16 @@ drag the variable back to the variable list.
         """Toggle the aggregation-results drawer from the central boundary button."""
         self._setAggregationResultsVisible(self.results_dock.isHidden())
 
+    def _hasAggregationResults(self):
+        """Require completed dock content, not merely an allocated result widget."""
+        return (self.pivotTableWindow is not None
+                and self.results_dock.widget() is self.pivotTableWindow
+                and self.pivotTableWindow.hasResults())
+
     def _setAggregationResultsVisible(self, visible):
         """Show or hide results while preserving the Data Summary layout width."""
-        if visible and self.pivotTableWindow is None:
-            self._syncAggregationResultsControls()
-            return
+        if not self._hasAggregationResults():
+            visible = False
         if bool(visible) == (not self.results_dock.isHidden()):
             self._syncAggregationResultsControls()
             return
@@ -1222,7 +1348,8 @@ drag the variable back to the variable list.
             finally:
                 self._results_transition = False
         else:
-            self._rememberAggregationResultsWidth()
+            if self._hasAggregationResults():
+                self._rememberAggregationResultsWidth()
             self._results_transition = True
             try:
                 self.results_dock.hide()
@@ -1234,6 +1361,9 @@ drag the variable back to the variable list.
     def _aggregationResultsVisibilityChanged(self, _visible):
         """Handle title-bar closes and keep all Results visibility controls synchronized."""
         if self._closing or self._results_transition:
+            return
+        if not self._hasAggregationResults():
+            self._setAggregationResultsVisible(False)
             return
         explicitly_visible = not self.results_dock.isHidden()
         if explicitly_visible:
@@ -1318,7 +1448,7 @@ drag the variable back to the variable list.
 
     def _syncAggregationResultsControls(self):
         """Update arrow direction and View-menu state without recursive signals."""
-        available = self.pivotTableWindow is not None
+        available = self._hasAggregationResults()
         expanded = available and not self.results_dock.isHidden()
         self.results_toggle_button.setVisible(available)
         self.results_toggle_button.setEnabled(available)
@@ -1328,6 +1458,7 @@ drag the variable back to the variable list.
             'Expand Aggregation Results.' if available else
             'Run an analysis to create Aggregation Results.')
         self.results_action.setEnabled(available)
+        self.results_dock.toggleViewAction().setEnabled(available)
         blocked = self.results_action.blockSignals(True)
         self.results_action.setChecked(expanded)
         self.results_action.blockSignals(blocked)
@@ -1342,11 +1473,14 @@ drag the variable back to the variable list.
         """Apply a deferred drawer resize after the window returns to normal mode."""
         if self._closing or self.isMaximized() or self.isFullScreen():
             return
-        expanded = self.pivotTableWindow is not None and not self.results_dock.isHidden()
+        expanded = self._hasAggregationResults() and not self.results_dock.isHidden()
         self._resizeWindowForAggregationResults(expanded)
         self._syncAggregationResultsControls()
 
     def closeEvent(self, event):
+        if self._resultArchiveBusy('closing PsySummary'):
+            event.ignore()
+            return
         if any(viewer.conversion_running for viewer in self.findChildren(DataFrameTableWidget)):
             MessageBox.information(self, 'Type Conversion in Progress', 'Please wait for type conversion to finish.')
             event.ignore()
@@ -1421,6 +1555,8 @@ drag the variable back to the variable list.
 
     def _variableCalculationBusy(self, action, exclude_viewer=None):
         """Prevent competing source-data operations during import or calculation."""
+        if self._resultArchiveBusy(action):
+            return True
         if self._analysisPreparationBusy(action):
             return True
         if self._dataExportBusy(action):
@@ -1440,7 +1576,7 @@ drag the variable back to the variable list.
         return True
 
     def _analysisPreparationBusy(self, action):
-        """Prevent re-entry or source changes during modal filter confirmation."""
+        """Prevent re-entry or source changes throughout background preparation and confirmation."""
         if not self._analysis_preparing:
             return False
         MessageBox.information(
@@ -1477,6 +1613,8 @@ drag the variable back to the variable list.
         settings.sync()
 
     def loadFilterEvent(self):
+        if self._variableCalculationBusy('loading setup'):
+            return False
         if self._dataImportBusy():
             return False
         try:
@@ -1578,20 +1716,18 @@ drag the variable back to the variable list.
                     PsyDataFunc.list2Script(getListWidgetData(self.columns_list), 'colVariables'),
                     PsyDataFunc.list2Script(self.getFilterList(), 'ruleList'),
                 ]
-                filtered_copy = self.getFilteredDataFrame(
-                    record_script=True, script_collector=script_lines)
-                script_lines.append(
-                    'filteredDataFrame = aggData.filterData(rowVariables, colVariables, ruleList, cdfPoolingOmegas)')
                 csv_options = {'index': False, 'header': True}
                 if extension == '.csv':
-                    script_lines.append(
-                        f"filteredDataFrame.to_csv({file_path!r}, index=False, header=True)")
+                    export_lines = [f"filteredDataFrame.to_csv({file_path!r}, index=False, header=True)"]
                 else:
                     csv_options.update(sep='|', quoting=csv.QUOTE_NONNUMERIC)
-                    script_lines.append('from dataPreparation import write_psydata')
-                    script_lines.append(
-                        f"write_psydata(filteredDataFrame, {file_path!r})")
-                return self._startDataExport(filtered_copy, file_path, csv_options, script_lines)
+                    export_lines = ['from dataPreparation import write_psydata',
+                                    f"write_psydata(filteredDataFrame, {file_path!r})"]
+                def publish(worker):
+                    lines = script_lines + worker.script_lines + [
+                        'filteredDataFrame = aggData.filterData(rowVariables, colVariables, ruleList, cdfPoolingOmegas)']
+                    return self._startDataExport(worker.result, file_path, csv_options, lines + export_lines)
+                return self._startPreparation('export', publish)
         except Exception as e:
             self.printLogInfo(f"Error in saving filtered data:{e}", 3)
             return None
@@ -1621,6 +1757,125 @@ drag the variable back to the variable list.
             self.printLogInfo(f"Error in saving file:{e}", 3)
             return None
 
+    def _resultArchiveBusy(self, action):
+        """Keep an archive job and its immutable result references alive until completion."""
+        if self._result_archive_thread is None:
+            return False
+        MessageBox.information(self, 'Result File in Progress',
+                               f'Results are being saved or loaded.\nPlease wait before {action}.')
+        return True
+
+    def _resultArchiveAllowed(self, action):
+        """Use the same host guards for menu and result-panel file actions."""
+        if self._variableCalculationBusy(action):
+            return False
+        if self.model_fit_running:
+            self._showModelFitBusyMessage(action)
+            return False
+        return True
+
+    def _resultDirectory(self):
+        """Return the last successful result-file directory without changing the setup directory."""
+        directory = Settings(Info.ConfigFile, QSettings.IniFormat).value('psysummary_results_directory', '')
+        return directory if isinstance(directory, str) and os.path.isdir(directory) else Info.UserPath
+
+    def loadResults(self):
+        """Load historical results without requiring or replacing source data."""
+        if not self._resultArchiveAllowed('loading results'):
+            return
+        path, _ = QFileDialog.getOpenFileName(self, 'Load Results', self._resultDirectory(),
+                                            'PsySummary Results (*.psyresult)')
+        if path and self._resultArchiveAllowed('loading results'):
+            try:
+                self._startResultArchive(path)
+            except Exception as error:
+                MessageBox.warning(self, 'Cannot Load Results', str(error))
+
+    def saveResults(self, result_widget=None):
+        """Save full-precision result snapshots, distinct from formatted TXT export."""
+        if not self._resultArchiveAllowed('saving results'):
+            return
+        result_widget = result_widget or self.pivotTableWindow
+        if result_widget is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(self, 'Save Results',
+                                            os.path.join(self._resultDirectory(), 'results.psyresult'),
+                                            'PsySummary Results (*.psyresult)')
+        if not path or not self._resultArchiveAllowed('saving results'):
+            return
+        if not path.lower().endswith('.psyresult'):
+            path += '.psyresult'
+            if os.path.exists(path) and MessageBox.question(
+                    self, 'Replace Results?', f'Replace the existing file?\n{path}',
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+                return
+        try:
+            self._startResultArchive(path, result_widget.resultSnapshot())
+        except Exception as error:
+            MessageBox.warning(self, 'Cannot Save Results', str(error))
+
+    def _startResultArchive(self, path, snapshot=None):
+        """Run archive I/O off-thread and retain the current results until publication succeeds."""
+        if self._resultArchiveBusy('starting another result operation') or self._dataExportBusy('saving or loading results'):
+            return False
+        worker = ResultArchiveThread(os.path.abspath(path), snapshot, self)
+        self._result_archive_thread = worker
+        worker.finished.connect(self._finishResultArchive)
+        worker.stageChanged.connect(self._writingStageChanged)
+        operation = 'Loading' if worker.loading else 'Saving'
+        try:
+            self.output.printOut(f'{operation} results: {worker.path}…', 0, False)
+            self.statusBar().showMessage(f'{operation} results…')
+            self._startFileOverlay(worker, f'{operation} results…', worker.path)
+            worker.start()
+        except Exception:
+            self._result_archive_thread = None
+            self._stopFileOverlay(worker)
+            worker.deleteLater()
+            self.statusBar().clearMessage()
+            raise
+
+    def _finishResultArchive(self):
+        """Publish a validated historical result only after the native worker has finished."""
+        worker = self._result_archive_thread
+        if worker is None or self.sender() is not worker:
+            return
+        try:
+            if self._closing:
+                return
+            self.statusBar().clearMessage()
+            if not worker.succeeded:
+                if worker.cancelled:
+                    self.output.printOut('Result file operation cancelled.', 4, False)
+                    return
+                raise ValueError(worker.error)
+            if worker.loading:
+                worker.result['_loaded_path'] = worker.path
+                result = PivotedDataWidget.fromSnapshot(worker.result)
+                self._showAggregationResults(result)
+            Settings(Info.ConfigFile, QSettings.IniFormat).setValue(
+                'psysummary_results_directory', os.path.dirname(worker.path))
+            for warning in worker.warnings:
+                self.output.printOut(warning, 4, False)
+            self.output.printOut(f'Results {"loaded" if worker.loading else "saved"}: {worker.path}', 1, False)
+        except Exception as error:
+            self.output.printOut(f'Result file operation failed: {error}', 2, False)
+            self._stopFileOverlay(worker)
+            MessageBox.warning(self, 'Result File Error', str(error))
+        finally:
+            worker.result = None
+            self._result_archive_thread = None
+            self._stopFileOverlay(worker)
+            worker.deleteLater()
+
+    def _shutdownResultArchive(self):
+        """Cancel and join archive I/O only during final application shutdown."""
+        self._closing = True
+        if self._result_archive_thread is not None:
+            self._result_archive_thread.requestInterruption()
+            self._result_archive_thread.wait()
+            self._stopFileOverlay(self._result_archive_thread)
+
     def _dataExportBusy(self, action):
         """Protect the source and worker lifetime while a data export is pending."""
         if self._data_export_thread is None:
@@ -1632,47 +1887,72 @@ drag the variable back to the variable list.
 
     def _startDataExport(self, dataframe, file_path, csv_options, script_lines):
         """Start one owned writer without copying the complete frame again."""
-        if self._dataExportBusy('starting another export'):
+        if self._dataExportBusy('starting another export') or self._resultArchiveBusy('exporting data'):
             return False
         worker = DataExportThread(dataframe, file_path, csv_options, script_lines, parent=self)
         self._data_export_thread = worker
         worker.finished.connect(self._finishDataExport)
+        worker.stageChanged.connect(self._writingStageChanged)
         try:
             self.output.printOut(f'Exporting {worker.row_count} rows to {worker.file_path}…', 0, False)
             self.statusBar().showMessage('Exporting data…')
+            self._startFileOverlay(worker, 'Exporting data…', worker.file_path)
             worker.start()
         except Exception:
             self._data_export_thread = None
+            self._stopFileOverlay(worker)
             worker.deleteLater()
             self.statusBar().clearMessage()
             raise
         return True
 
+    def _startFileOverlay(self, worker, message, path):
+        """Associate shared waiting feedback with exactly one owned file operation."""
+        self._file_overlay_worker = worker
+        self._startModelFitOverlay(message, os.path.basename(path))
+
+    def _stopFileOverlay(self, worker):
+        """Ignore late cleanup from an old job so it cannot hide another task's feedback."""
+        if self._file_overlay_worker is worker:
+            self._file_overlay_worker = None
+            self._stopModelFitOverlay()
+
+    def _writingStageChanged(self, message):
+        """Show sparse stages only while the emitting save/export job is still owned."""
+        if self.sender() is not None and self.sender() in (self._data_export_thread, self._result_archive_thread):
+            self.statusBar().showMessage(message)
+            if self.sender() is self._file_overlay_worker:
+                self.model_fit_overlay.setStage(message)
+
     def _finishDataExport(self):
         """Record successful exports and release guards only after native completion."""
         worker = self._data_export_thread
-        if worker is None:
+        if worker is None or self.sender() is not worker:
             return
-        self._data_export_thread = None
-        worker.deleteLater()
-        if self._closing:
-            return
-        self.statusBar().clearMessage()
-        if worker.succeeded:
-            try:
-                PsyDataFunc.genScript(worker.script_lines)
-            except Exception as error:
+        try:
+            if self._closing:
+                return
+            self.statusBar().clearMessage()
+            if worker.succeeded:
+                try:
+                    PsyDataFunc.genScript(worker.script_lines)
+                except Exception as error:
+                    self.output.printOut(
+                        f'Data were saved to {worker.file_path}, but script recording failed: {error}', 4, False)
                 self.output.printOut(
-                    f'Data were saved to {worker.file_path}, but script recording failed: {error}', 4, False)
-            self.output.printOut(
-                f'Data export finished: {worker.row_count} rows saved to {worker.file_path}.', 1, False)
-            self.statusBar().showMessage('Data export finished.', 5000)
-        elif worker.cancelled and not worker.error:
-            self.output.printOut('Data export cancelled. The destination was not changed.', 4, False)
-        else:
-            message = f'Could not export data to {worker.file_path}: {worker.error}'
-            self.output.printOut(message, 2, False)
-            MessageBox.warning(self, 'Data Export Failed', message)
+                    f'Data export finished: {worker.row_count} rows saved to {worker.file_path}.', 1, False)
+                self.statusBar().showMessage('Data export finished.', 5000)
+            elif worker.cancelled and not worker.error:
+                self.output.printOut('Data export cancelled. The destination was not changed.', 4, False)
+            else:
+                message = f'Could not export data to {worker.file_path}: {worker.error}'
+                self.output.printOut(message, 2, False)
+                self._stopFileOverlay(worker)
+                MessageBox.warning(self, 'Data Export Failed', message)
+        finally:
+            self._data_export_thread = None
+            self._stopFileOverlay(worker)
+            worker.deleteLater()
 
     def _shutdownDataExport(self):
         """Cancel and join the writer only during final application shutdown."""
@@ -1681,6 +1961,7 @@ drag the variable back to the variable list.
         if worker is not None:
             worker.requestInterruption()
             worker.wait()
+            self._stopFileOverlay(worker)
 
     # 保存预设文件
     def saveFilterEvent(self):

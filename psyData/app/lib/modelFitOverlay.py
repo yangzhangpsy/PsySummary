@@ -1,14 +1,14 @@
-"""Non-blocking visual overlay shown during PsySummary model fitting."""
+"""Shared visual waiting overlay for PsySummary background operations."""
 
-from PyQt5.QtCore import QPointF, QRectF, Qt, QTimer
+from PyQt5.QtCore import QElapsedTimer, QPointF, QRectF, Qt, QTimer
 from PyQt5.QtGui import QColor, QFont, QPainter, QPalette
 from PyQt5.QtWidgets import QWidget
 
-from app.lib.dotted_spinner import FRAME_COUNT, FRAME_INTERVAL_MS, paint_dotted_spinner
+from app.lib.dotted_spinner import FRAME_INTERVAL_MS, elapsed_spinner_frame, paint_dotted_spinner
 
 
 class ModelFitOverlay(QWidget):
-    """Block content interaction while painting a small animated fitting spinner."""
+    """Block content interaction while painting a small animated waiting spinner."""
 
     OVERLAY_COLOR = (245, 245, 245, 64)
     SPINNER_COLOR = (70, 70, 70)
@@ -16,13 +16,21 @@ class ModelFitOverlay(QWidget):
     MESSAGE_COLOR = (25, 25, 25)
     DETAIL_COLOR = (47, 111, 176)  # #2F6FB0
     DARK_THEME_DETAIL_COLOR = (138, 199, 255)  # #8AC7FF
+    SHOW_DELAY_MS = 300
 
     def __init__(self, parent=None):
         """Initialize a hidden overlay whose animation repaints only this widget."""
         super().__init__(parent)
         self._frame = 0
+        self._animation_clock = QElapsedTimer()
         self._message = 'Preparing model fitting…'
         self._detail = ''
+        self._running = False
+        self._feedback_visible = False
+        self._reveal_timer = QTimer(self)
+        self._reveal_timer.setSingleShot(True)
+        self._reveal_timer.setTimerType(Qt.PreciseTimer)
+        self._reveal_timer.timeout.connect(self._revealFeedback)
         self.animation_timer = QTimer(self)
         self.animation_timer.setInterval(FRAME_INTERVAL_MS)
         self.animation_timer.timeout.connect(self._advanceFrame)
@@ -31,15 +39,32 @@ class ModelFitOverlay(QWidget):
         self.hide()
 
     def start(self, message='Preparing model fitting…', detail=''):
-        """Show the blocking overlay and start its localized spinner animation."""
+        """Block immediately, revealing visual feedback only after 300 ms of waiting."""
         self._message = message
         self._detail = detail
-        self._frame = 0
+        if not self._running:
+            self._running = True
+            self._feedback_visible = False
+            self._frame = 0
+            self._animation_clock.start()
+            self._reveal_timer.start(self.SHOW_DELAY_MS)
         if self.parentWidget() is not None:
             self.setGeometry(self.parentWidget().rect())
         self.show()
         self.raise_()
         self.setFocus(Qt.OtherFocusReason)
+        self.update()
+
+    def _revealFeedback(self):
+        """Ignore stopped jobs and premature callbacks from a superseded delay."""
+        if not self._running or self._feedback_visible:
+            return
+        remaining = self.SHOW_DELAY_MS - self._animation_clock.elapsed()
+        if remaining > 0:
+            self._reveal_timer.start(remaining)
+            return
+        self._feedback_visible = True
+        self._frame = elapsed_spinner_frame(self._animation_clock.elapsed())
         self.animation_timer.start()
         self.update()
 
@@ -49,8 +74,16 @@ class ModelFitOverlay(QWidget):
         self._detail = str(label)
         self.update()
 
+    def setStage(self, message):
+        """Change the phase text while retaining the current model and condition detail."""
+        self._message = str(message)
+        self.update()
+
     def stop(self):
-        """Stop the spinner and uncover the PsySummary interface."""
+        """Cancel pending feedback and uncover immediately, without a minimum display time."""
+        self._running = False
+        self._feedback_visible = False
+        self._reveal_timer.stop()
         self.animation_timer.stop()
         self.hide()
         self._frame = 0
@@ -64,7 +97,9 @@ class ModelFitOverlay(QWidget):
 
     def _advanceFrame(self):
         """Advance one pulse frame and repaint only the spinner region."""
-        self._frame = (self._frame + 1) % FRAME_COUNT
+        if not self._running or not self._feedback_visible:
+            return
+        self._frame = elapsed_spinner_frame(self._animation_clock.elapsed())
         self.update(self._spinnerUpdateRect())
 
     def _spinnerCenter(self):
@@ -78,6 +113,8 @@ class ModelFitOverlay(QWidget):
 
     def paintEvent(self, _event):
         """Paint a light translucent surface, spinner, and status message."""
+        if not self._feedback_visible:
+            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.fillRect(self.rect(), QColor(*self.OVERLAY_COLOR))

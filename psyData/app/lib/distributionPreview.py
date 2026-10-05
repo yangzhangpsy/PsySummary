@@ -16,7 +16,7 @@ class DistributionPreviewDialog(QDialog):
     EXCLUDED_COLOR = '#D95319'
     BEFORE_COLOR = '#7F7F7F'
     def __init__(self, data, retained_mask, target_variables, row_facets=None,
-                 column_facets=None, parent=None):
+                 column_facets=None, parent=None, prepared_data=False):
         """Initialize the interactive distribution preview.
 
         :param data: Original unfiltered data frame.
@@ -25,6 +25,7 @@ class DistributionPreviewDialog(QDialog):
         :param row_facets: Variables configured in the Summary Rows area.
         :param column_facets: Variables configured in the Summary Columns area.
         :param parent: Optional parent widget.
+        :param prepared_data: Use an owned compact snapshot already converted by the preparation worker.
         :return: None.
         """
         super().__init__(parent)
@@ -34,7 +35,7 @@ class DistributionPreviewDialog(QDialog):
         self.target_variables = [
             variable for variable in target_variables
             if variable in data.columns
-            and pd.to_numeric(data[variable], errors='coerce').notna().any()]
+            and (prepared_data or pd.to_numeric(data[variable], errors='coerce').notna().any())]
         if not self.target_variables:
             raise ValueError('Distribution Preview requires at least one numeric Data variable.')
         self.row_facets = [
@@ -45,10 +46,11 @@ class DistributionPreviewDialog(QDialog):
         preview_columns = list(dict.fromkeys(
             self.target_variables + self.row_facets + self.column_facets))
         # Own one compact snapshot; never keep a reference/copy of the whole table.
-        self.data = data.loc[:, preview_columns].copy()
+        self.data = data if prepared_data else data.loc[:, preview_columns].copy()
         self.data.index = pd.RangeIndex(len(self.data))
-        for target in self.target_variables:
-            self.data[target] = pd.to_numeric(self.data[target], errors='coerce')
+        if not prepared_data:
+            for target in self.target_variables:
+                self.data[target] = pd.to_numeric(self.data[target], errors='coerce')
 
         self.setWindowTitle('Distribution Preview')
         self.resize(1120, 820)
