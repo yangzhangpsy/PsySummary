@@ -1,184 +1,219 @@
-All materials—including the PsySummary application, its source code, documentation, and validation datasets—are available here.
+# PsySummary
 
-**Download options**
+PsySummary is a graphical application for transparent, reproducible reaction-time (RT) preprocessing, descriptive summaries, and optional distributional and cognitive-model fitting. It records supported data-processing and analysis operations as readable Python code.
 
-From our website
-https://www.psybuilder.com
+Choose exclusion criteria, grouping variables, and models from the study design and analysis goals. The interface helps implement and inspect those decisions; it does not determine which analysis is appropriate.
 
-• Run PsySummary inside PsyBuilder (Toolboxes → Results Data Aggregation), or
+## Software access
 
-• Download and install it as a standalone program.
+- Source code and documentation are available in this [public repository](https://github.com/yangzhangpsy/PsySummary).
+- See the [PsyBuilder website](https://www.psybuilder.com) for desktop download and installation information.
+- PsySummary can run as a standalone application or inside PsyBuilder through **Toolboxes > Results Data Aggregation**.
 
-_**Direct installers (available on this page)**_
+Choose an installer matching your operating system and processor architecture. GitHub's **Code > Download ZIP** provides source code, not a prebuilt application.
 
-• Windows: PsySummary--Win.zip
+On Windows, extract the installer archive before launching it. Use **Extract All**; if extraction fails, try a current version of [7-Zip](https://www.7-zip.org). On macOS, open the supplied disk image and install the application.
 
-• macOS (Apple Silicon): PsySummary--MacSilicon.dmg
+## Repository contents
 
-• Linux: come soon...
+| Location | Contents |
+| --- | --- |
+| [psyData/](psyData/) | Application source and build files |
+| [dataValidation.zip](dataValidation.zip) | Preprocessing validation data and comparison materials |
+| [figs/](figs/) | Interface illustrations |
+| [LICENSE](LICENSE) | MIT license |
 
-_**Folder structure**_
+## Tutorial
 
-• PsyData/   PsySummary source code
+The workflow has three stages:
 
-• dataValidation/ Validation datasets
+1. **Raw data management:** import, inspect, rename, and transform variables.
+2. **Data filtering:** define eligibility and exclusion criteria, inspect their effects, and export retained trials.
+3. **Data summary and RT modeling:** calculate descriptive statistics or fit models to retained trial-level observations.
 
+- [Step 1: Raw Data Management](#1)
+- [Step 2: Data Filtering](#2)
+- [Step 3: Data Summary and RT Modeling](#3)
+- [Validation and Scope](#validation-and-scope)
 
+<a id="1"></a>
+## Step 1: Raw Data Management
 
+### 1.1 Load and inspect data
 
-# Reaction time outlier handling in behavioral research. Part II: PsySummary software, validation, and tutorial
+PsySummary accepts MATLAB (`.mat`), delimited text (`.csv`, `.txt`, `.dat`), and typed `.psydata` files.
 
-<p align="center"> Zhicheng Lin<sup>1,2</sup>, lian-zi Xing<sup>1</sup>, Xin Chen<sup>1</sup>, Yue-Jie Chen<sup>1</sup>, Yang Zhang<sup>1</sup> </p>
+1. Choose **File > Load Data**, select the input files, and click **Open**.
+2. For delimited text, configure **Text Encoding**, **Contains Header**, **Text Delimiter**, and **Merge Delimiters** in the **Data Format** dialog. Check the preview, then click **OK**.
+3. Choose **File > View Data** to open **Data Viewer**. Use **Data View** to inspect values and **Variable View** to inspect names, storage types, and display precision.
 
-<sup>1</sup> _Department of Psychology, Soochow University, Suzhou, Jiangsu, China 215000_
-<br>
-<sup>2</sup> _Department of Psychology, Yonsei University, Seoul, Republic of Korea, 03722_
+Choose a predefined delimiter or enter a custom separator. **WhiteSpace** includes spaces and tabs; enter a tab for tab-only separation. **Merge Delimiters** optionally treats consecutive separators as one. For quoted CSV, use a comma without Merge Delimiters. Multi-character separators use regular-expression parsing and do not promise support for quoted fields containing the separator.
 
+In **Variable View**, double-click **Name** to rename a variable, **Type** to choose Numeric, Text, or Boolean, or **Decimals** to change numeric display precision. A column header in **Data View** can also be double-clicked to rename it. Type conversion validates the entire source column and preserves missing values; changing Decimals does not alter stored or exported values. Renaming updates current references, not previously calculated results.
 
-* [Step 1: Raw Data Management](#1)
-* [Step 2: Data Filtering](#2)
-* [Step 3: Generating Summary Statistics](#3)
+The manuscript tutorial uses the following renamings:
 
+| Imported name | Tutorial name | Meaning |
+| --- | --- | --- |
+| `target_1.rt` | `target.rt` | RT in seconds |
+| `target_1.resp` | `target.resp` | Observed response |
+| `target_1.acc` | `target.acc` | Accuracy: 0 incorrect, 1 correct |
+| `trialsLoop_1_SOA` | `SOA` | Stimulus onset asynchrony in milliseconds |
 
-A Brief Tutorial
-To guide researchers through implementing these methods in their own workflow, we now provide a step-by-step tutorial. This brief tutorial illustrates the implementation of robust RT data analysis through PsySummary, demonstrating its key capabilities for applying recommended OEPs and facilitating methodological transparency and reproducibility through two key features: saving and loading filter configurations, and generating reproducible analysis code.
+In that example, `num` and `name` identify the same participants. Use the corresponding identifiers and units for your own data.
 
-Data Processing Framework
-PsySummary implements a three-stage data processing pipeline for robust RT analysis:
-1.	Raw Data Management: Import data files, define variables, and apply transformations
-2.	Data Filtering: Implement appropriate outlier exclusion procedures
-3.	Summary Statistics Generation: Produce statistical outputs and code
+Choose **File > Save Data** to preserve the loaded source data as `.psydata`. **File > Open Recent** reopens previously imported files.
 
-The following sections provide step-by-step instructions for each stage, with emphasis on implementing methodologically sound outlier exclusion procedures aligned with current best practices.
+### 1.2 Arrange the workspace
 
-<h2 id="1">Step 1: Raw Data Management</h2>
-Step 1.1 Loading Data Files
-PsySummary accepts multiple common data formats including .mat, .txt, .dat, and its native .psydata format. To load your data:
-1.	Select File → Load Data from the menu bar in the Data Summary window
-2.	Navigate to your data file location, select the file, and click Open
+Use **View** to show **Output**, **Script**, and **Aggregation Results**. Output reports progress, warnings, and errors; Script displays the recorded analysis code.
 
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f1.png)
+### 1.3 Transform variables
 
-3.	To view the imported data matrix, select File → View Data
-Note: The Data Viewer window displays variable names in the top first row, trial numbers in the left first column, and corresponding values in each cell.
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f2.png)
+1. Choose **Toolbox > Transform Variable**.
+2. Enter a target name, such as `log_RT`.
+3. Click **log**, then drag `target.rt` into the parentheses to construct its natural logarithm.
+4. Click **OK** to calculate and close the dialog, or **Run** to calculate while keeping it open.
 
-To preserve your data for future sessions:
-4.	Select File → Save Data to store your data in the .psydata format, which can be efficiently read by PsySummary in subsequent analyses
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f3.png)
+The new variable appears in **Variables**. Cancel does not undo variables created by earlier Runs. Transformations should serve a justified analysis; the RT models below use the original RT variable in its recorded time unit, not log-transformed RTs.
 
-Step 1.2 Configuring the Interface
-Before proceeding with analysis, optimize your workspace:
-1.	Select View from the menu bar to configure which windows appear in the main interface: 
-–	The Output Window displays processing information and notifications about successful operations or errors
-–	The Script Window shows the automatically generated analysis code that documents all processing steps
-Maintaining visibility of both windows is recommended for monitoring analysis progress and facilitating reproducible reporting.
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f4.png)
+<a id="2"></a>
+## Step 2: Data Filtering
 
-Step 1.3 Transforming Variables
-RT distributions are typically positively skewed, and transformations can improve normality when required for parametric analyses (Ratcliff, 1993; Whelan, 2008). To transform variables:
-1.	Select Toolbox → Transform Variable
-2.	In the pop-up Compute Variable window:
-–	Enter a name for the new, transformed variable in Target Variable (e.g., “log_RT”)
-–	Specify the transformation formula (e.g., for logarithmic transformation of “target_1.rt”)
-–	Click OK to execute the transformation
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f5.png)
+### 2.1 Define the analysis groups
 
-3.	The transformed variable will automatically appear in the Variables panel for subsequent analysis.
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f6.png)
+Drag participant identifiers into **Rows**, condition variables into **Columns**, and the measure into **Data**. For the manuscript example, use `num` and `name` in Rows, `SOA` in Columns, and `target.rt@Mean` in Data.
 
-<h2 id="2">Step 2: Data Filtering</h2>
-Step 2.1 Configuring Data Structure 
-Before implementing outlier exclusion, configure the structure of your analysis:
-1.	From the Variables panel, drag subject identifiers to the Rows box
-2.	Drag condition variables to the Columns box
-3.	Drag dependent measures (e.g., RT variables) to the Data box
+Rows and Columns define the groups used for filtering and aggregation. Do not assign the same grouping variable to both. Data can contain different analyses of the same measure.
 
-**_Important_**: Each variable can only be assigned to one attribute box (Rows, Columns, or Data). Double-assignment will trigger an error message.
-	
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f7.png)
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f8.png)
-Step 2.2 Choosing Statistical Operation
-By default, PsySummary calculates the mean for variables in the Data box. To change the calculation:
-1.	Double-click on the “@Mean” indicator
-2.	Select the desired operation from the dropdown menu (e.g., median, standard deviation)
-3.	Click Run to generate the statistical results (without filtering; see the next step for filtering).
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f9.png)
-Step 2.3 Implementing Data Filtering and Outlier Exclusion
-This critical stage involves implementing methodologically sound outlier exclusion procedures based on current best practices.
+### 2.2 Choose an analysis
 
-Step 2.3.1 Filtering Based on Accuracy
-First, remove error trials before addressing RT outliers:
-1.	Click Define Filters
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f10.png)
-2.	From Variable Names, select your accuracy variable (e.g., “target_1.acc”)
-3.	Click the Check List option
-4.	Select “1” (correct) and leave “0” (incorrect) unchecked
-5.	Click Add Filter to add this criterion to the Filter List
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f11.png)
-Step 2.3.2 Filtering Based on RT
-PsySummary supports multiple outlier exclusion methods aligned with methodological recommendations:
-6.	From Variable Names, select your RT variable (e.g., “target_1.rt”)
-7.	Click the Range option
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f12.png)
-8.	Configure the outlier exclusion by:
-–	Setting the appropriate inequality (“<” for upper bound, “>” for lower bound)
-–	Selecting the exclusion method from the dropdown menu:
-•	Raw value: Apply absolute cutoffs (e.g., exclude RTs < 200 ms or > 3000 ms)
-•	SDs: Traditional standard deviation method (e.g., exclude RTs > 2.5 SD from mean)
-•	Shifting Z: Implement the nonrecursive shifting z-score criterion (Van Selst & Jolicoeur, 1994), which adjusts cutoffs based on sample size
-•	MAD: Apply the median absolute deviation method (Leys et al., 2013), which is robust to initial outliers
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f13.png)
-9.	For a comprehensive approach, you may define both lower and upper bounds:
-–	Lower bound: Set inequality to “>” and value to minimum acceptable RT (e.g., 200 ms)
-–	Upper bound: Add another filter with “<” and select appropriate method (e.g., Shifting Z or MAD)
-10.	Click Add Filter after configuring each criterion
-Note on selection: The shifting z-score method is particularly recommended for datasets with fewer than 100 trials per condition or with unequal trial counts across conditions (Thompson, 2006). The MAD method is recommended for heavily skewed distributions (Leys et al., 2013).
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f14.png)
+Click a Data item once to open the analysis menu. Select a descriptive statistic or RT distribution, or select **Ratcliff Diffusion Model**, **Linear Ballistic Accumulator**, or **Racing Diffusion Model** to open its settings.
 
-Step 2.3.3 Filtering Based on Pooling Cumulative Distribution Function (CDF)
-11.	From Variable Names, select the RT variable (e.g., “target_1.rt”)
-12.	Click the Pooling CDF option 
-Note on requirements: Pooling CDF fits a mixture to pooled cumulative distributions (Miller, 2024). The implementation requires at least 50 eligible trials per group; this numerical safeguard does not guarantee a reliable fit. Inspect the fitted mixture and justify the cutoff.
-13.	Click OK to confirm your filter configuration.
-Note on filter ordering and logic: PsySummary applies filters sequentially in top-down order:
-–	Ensure logical ordering (typically remove error trials first, then address RT outliers)
-–	To adjust the order, select and drag conditions within the Filter List
-–	For complex filtering logic, use the “and”/“or” options when adding multiple criteria
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f15.png)
+The same menu is available through **right-click > Change Analysis...**. Double-click a configured cognitive-model item, or choose **right-click > Model Settings...**, to reopen its settings. Conventional RT distributions do not have a separate cognitive-model settings dialog.
 
-Step 2.3.4 Saving and Loading Filter Configurations
-To ensure consistency across analyses:
-14.	Click Save Filter to store your filter configuration
-15.	In future sessions, use Load Filter to apply identical procedures
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f16.png)
+### 2.3 Define filters
 
-<h2 id="3">Step 3: Generating Summary Statistics</h2>
-Step 3.1 Saving Results
-After configuring your analysis and outlier exclusion procedures:
-1.	Click Run to process the data and generate the summary table
+Click **Define Filters**, select the variable, choose **Check List**, **Range**, or **Pooling CDF**, and click **Add Filter** to add a rule. Click **OK** to retain the Filter List.
 
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f17.png)
+For the manuscript's correct-response RT summaries:
 
-2.	If you selected the Pooling CDF option in the previous steps, after clicking Run you’ll be presented with a visualization window showing: a histogram of your RT data distribution; an overlay of the fitted mixture density model; and a visual indication of potential outliers in the tails.
+1. Select `target.acc`, choose **Check List**, and retain `1` only.
+2. Select `target.rt`, choose **Range**, and define **Raw value** bounds of `> 0.1` and `< 1.5`.
+3. Add the criteria to the Filter List. These bounds are in seconds and are an illustration, not a universal recommendation.
 
-At this point, you need to make an informed decision about how to proceed:
--	Option 1: Skip CDF pooling entirely. If the visualization suggests the method isn’t appropriate for your data (e.g., due to multimodality or insufficient sample size). Click Abort CDF Pooling to return to the main interface without applying this method.
--	Option 2: Inspect the cutoff. Click the plot to adjust ω (omega), or click Estimated ω to restore the fitted estimate. Trials with CDF values above ω are excluded; values at or below ω are retained. A smaller cutoff excludes more trials. The fitted estimate is not a universally optimal exclusion rule.
--	Option 3: Apply the optimized outlier detection. Once you’re satisfied with the ω parameter setting and the resulting outlier identification, click OK to finalize this step and apply the CDF-based outlier removal.
+The demo includes a missing RT/response and very short RTs. The RT bounds exclude missing or out-of-range values without replacing them. Inspect the resulting counts rather than assuming that every input row is eligible.
 
-Note: Small or heterogeneous samples may yield unreliable mixtures. Abort CDF Pooling if the fit is unsuitable; sample size alone does not establish validity.
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f18.png)
-3.	To use the results in other applications:
-–	Click Clipboard to copy the table to your clipboard
-–	Click Export to save results as a text file
-  ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f19.png)
+For categorical variables, **Search values...**, **Select All**, and **Invert Selection** help select long lists of codes. To retain all eligible identifiers except one, select all and clear the unwanted value; also exclude blank or missing identifiers.
 
-Step 3.2 Generating Reproducible Analysis Code
-PsySummary automatically generates Python code documenting all analysis steps:
-1.	View the generated code in the Script window
-2.	Export the python code (.py) by right-click anywhere inside this Script window, and select Export
+Available range methods are:
 
-Including this code in your method section or supplementary materials enhances transparency and facilitates replication.
- ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f20.png)
-      
+| Method | Criterion |
+| --- | --- |
+| Raw value | An absolute bound in the variable's recorded unit |
+| SDs | A bound based on the group's mean and sample standard deviation |
+| Shifting Z | An SD cutoff around the mean adjusted to the group's sample size, without iterative recalculation |
+| MAD | A bound based on the group's median and scaled median absolute deviation |
+
+Filters are applied in listed order. Drag rules to reorder them; **and** and **or** combine the two comparisons within a range rule.
+
+When group-estimated SD, MAD, Shifting Z, or Pooling CDF criteria are used across multiple Rows/Columns cells, Output warns about possible condition-wise filtering. A common fixed RT window or checklist alone does not trigger that warning. Choose grouping and thresholds independently of the condition effect being investigated.
+
+**For correct/error cognitive modeling, remove the correct-only filter on `target.acc` while retaining the accuracy variable.**
+
+### 2.4 Optional Pooling CDF
+
+Pooling cumulative distribution functions (CDFs) fits RT distributions within the configured groups and examines their pooled CDF values. It requires finite positive RTs and at least 50 eligible trials per group. This minimum is a numerical safeguard, not a guarantee of reliable estimation.
+
+For the tutorial demonstration, group by participant using `num` and `name` in Rows and leave Columns empty, rather than fitting the smaller participant-by-SOA cells. Apply eligibility rules before Pooling CDF.
+
+1. Add a **Pooling CDF** rule for `target.rt`.
+2. Click **Apply Filters & Run** to inspect the pooled CDF histogram, fitted mixture density, and estimated cutoff.
+3. Click the plot to adjust omega, or **Estimated ω** to restore the fitted estimate.
+4. Click **OK** to retain CDF values at or below omega and exclude values above it. The cutoff must be finite and strictly between 0 and 1.
+5. Choose **Abort CDF Pooling** to skip the rule without changing the data.
+
+A smaller cutoff excludes more trials. The fitted estimate is not automatically an appropriate exclusion rule; inspect the mixture and justify its use. Remove the optional CDF rule and restore SOA to Columns before returning to the main fixed-window summary example.
+
+### 2.5 Preview and export retained trials
+
+Click **Preview Filter Effects** in Data Summary, or **Distribution Preview** in Define Filter. Select a variable/group from the list and inspect the before/after counts and plots:
+
+- Violin, boxplot, and raw points.
+- Histogram with kernel density estimate (KDE).
+- Empirical cumulative distribution function (ECDF).
+
+Before/after panels share axis scales; retained and excluded observations have distinct colors.
+
+Use **Export Filtered Data** or **File > Save Filtered Data** to save retained trial-level observations as CSV or `.psydata`, independently of the final summary. This does not replace the loaded source data.
+
+To filter within participants but summarize by condition, leave Columns empty during participant-wise filtering and export the retained trials. Reload that export, add SOA to Columns, and summarize with an empty Filter List to avoid filtering the same trials again.
+
+### 2.6 Save and reopen a setup
+
+**Save Setup** writes a `.psysum` containing Rows, Columns, Data, filters, and cognitive-model settings. **Load Setup** restores those settings.
+
+A setup is not a data file and does not recreate import, renaming, or computed-variable operations. Load matching data and prepare the required variables before reopening it. Incomplete model drafts can be saved, but must be valid before fitting.
+
+<a id="3"></a>
+## Step 3: Data Summary and RT Modeling
+
+### 3.1 Calculate and save results
+
+Click **Apply Filters & Run** to apply the current rules and display **Aggregation Results**. Models use retained trial-level observations, not previously aggregated RT means.
+
+- **Clipboard** copies the displayed table.
+- **Export > Export Table (.txt)** saves the displayed table as text.
+- **Export > Save Results (.psyresult)** preserves completed results and available fit diagnostics.
+- **Load Results...** reopens a `.psyresult` without rerunning the analysis.
+
+A `.psysum` saves an analysis setup; a `.psyresult` saves completed results.
+
+### 3.2 Fit RT distributions
+
+Click the RT item in Data and select a distribution. Options include unshifted and shifted gamma, Weibull, and lognormal distributions, alongside Wald, ex-Wald, ex-Gaussian, and inverse-Gaussian variants.
+
+Click **Apply Filters & Run**, then inspect the fitted parameters, N valid, Converged, Parameter boundary, Shift warning, log-likelihood, Akaike information criterion (AIC), and Bayesian information criterion (BIC). Optimizer convergence does not, by itself, establish an adequate fit.
+
+Click **View Fit** in the Converged section to open **RT Fit Diagnostics**. Select a fit from the list to inspect the observed histogram and fitted density, and the empirical and fitted CDFs. Compare information criteria only when the likelihoods describe the same observations with compatible response coding.
+
+### 3.3 Fit cognitive RT models
+
+Retain both correct and error trials for these examples: remove the correct-only accuracy filter, keep the accuracy column, and use eligible RTs in their recorded unit. In the manuscript example, group by participant across SOAs and use raw RT bounds of 0.1-1.5 s.
+
+1. Select a cognitive model from the Data item's analysis menu.
+2. Set **RT Unit**, choose **Response Variable**, and configure the response mappings.
+3. Set parameters to Fixed or Free, specify values or optimizer starts and bounds, and review **Fit Options**. Use an explicit random seed when reproducible optimizer starts are required.
+4. Click **Save Settings**, then **Apply Filters & Run**.
+
+| Model | Mapping and identification requirements |
+| --- | --- |
+| Ratcliff Diffusion Model | Two physical response categories and a binary **Accuracy Variable** are required. Choose Accuracy Coding or Response Coding. The evidence starting position is relative `zr = z/a`; keep `s` fixed to identify scale. |
+| Linear Ballistic Accumulator | Map response categories to accumulators; accuracy is optional. The implementation uses positive-truncated normal drift. Keep at least one `sd_v` fixed and ensure `b > A >= 0`. |
+| Racing Diffusion Model | Map response categories to accumulators; accuracy is optional. Use non-negative drift rates, `b > A >= 0`, and fixed `s`. |
+
+Each Rows/Columns group is fitted independently. Inspect observation and response counts, convergence, parameter estimates, and warnings, especially for sparse groups or groups with few error responses.
+
+In **RT Fit Diagnostics**, **Response** and, when accuracy is available, **Correct / Error** provide views of the same fitted parameters. Switching views does not refit the model. Density and CDF panels compare observed data with model predictions.
+
+### 3.4 Export reproducible analysis code
+
+Show **Script** through View, then **right-click inside Script > Export** to save the Python analysis script and its seven dependencies:
+
+`aggregateData.py`, `rtDist.py`, `cognitiveModels.py`, `cognitiveModelSpec.py`, `expression.py`, `dataPreparation.py`, and `poolingCDF.py`.
+
+Keep these files together with the input data. Check paths and Python dependencies before running the exported script. Share the data, script, modules, and analysis settings needed to reproduce the calculation.
+
+Analysis calls are recorded after the selected analysis completes successfully. Generated code covers supported data-processing and analysis operations, not every window layout, plot selection, or result-file action.
+
+## Validation and scope
+
+The [preprocessing validation archive](dataValidation.zip) provides reference data and comparisons. The manuscript and Supplementary Validation S1 describe preprocessing checks, cognitive-model numerical comparisons with rtdists, and GUI import/replay checks. Agreement for specified calculations does not establish a universally appropriate filter or general parameter recovery.
+
+PsySummary supports descriptive summaries, selected RT distributions, and independently grouped cognitive-model fits. It does not provide hierarchical cognitive-model estimation, trial-level parameter regression, automatic model selection, or general regression-based influence diagnostics such as Cook's distance. Export retained trial-level data for analyses outside this scope.
+
+## Related manuscript
+
+**Reaction time outlier handling in behavioral research. Part II: PsySummary software, validation, and tutorial**
+
+Zhicheng Lin, Lian-Zi Xing, Tracy Xin Chen, Yue-Jie Chen, and Yang Zhang.
