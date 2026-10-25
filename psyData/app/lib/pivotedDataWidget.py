@@ -373,8 +373,6 @@ class PivotedDataWidget(QWidget):
                     PsyDataFunc.printOut(message, kind)
             else:
                 warnConditionWiseFiltering(row_vars, col_vars, dataframe, self.ruleList)
-            generateScript(row_vars, col_vars, target_vars, self.ruleList,
-                           self._prepared_analysis.filter_script_lines)
             if self._fit_target_count:
                 QTimer.singleShot(0, self._processNextTarget)
             else:
@@ -501,6 +499,8 @@ class PivotedDataWidget(QWidget):
             raise ValueError('No valid results were generated for the current selection.')
         pd.set_option('display.float_format', lambda x: '%.10f' % x)
         self.createResultTable(self._col_vars, self._row_vars)
+        generateScript(self._row_vars, self._col_vars, self._target_vars, self.ruleList,
+                       self._prepared_analysis.filter_script_lines)
         self._analysis_complete = True
         if self._fit_target_count:
             handleFitThreadSignal(1, 'Model fitting finished.', False)

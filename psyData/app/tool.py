@@ -1,5 +1,5 @@
 import re
-from app.dataPreparation import grouped_filter_estimates, is_range_expression, parse_checklist_values, split_filter_rule
+from app.dataPreparation import grouped_filter_estimates, is_range_expression, parse_checklist_values, split_filter_rule, has_estimated_filter
 from operator import lt, le, gt, ge
 
 import numpy as np
@@ -12,6 +12,7 @@ from app.psyDataFunc import PsyDataFunc
 from app.rtDist import CDF_pooling_main
 from app.lib.cdfPoolingWidget import fit_outlier_model, CdfPoolingWidget
 from app.fitCancellation import FitCancelled
+from app.poolingCDF import validate_cdf_cutoff
 
 
 CONDITION_WISE_FILTER_REFERENCE = (
@@ -24,16 +25,17 @@ CONDITION_WISE_FILTER_REFERENCE = (
 def warnConditionWiseFiltering(row_var_list, column_var_list, data_frame, rule_list, log=None):
     """Log a warning when active filters are combined with multiple observed data cells."""
     grouping_variables = list(dict.fromkeys(list(row_var_list) + list(column_var_list)))
-    if not rule_list or not grouping_variables:
+    if not grouping_variables or not has_estimated_filter(rule_list):
         return 0
     combination_count = int(data_frame[grouping_variables].drop_duplicates().shape[0])
     if combination_count > 1:
         grouping_label = ' × '.join(grouping_variables)
         (log or PsyDataFunc.printOut)(
-            'Potential condition-wise filtering: The current Rows × Columns settings define '
-            f'{combination_count} observed data cells ({grouping_label}) while filters are active. '
-            'Any exclusion criterion estimated within these cells is applied separately by condition, '
-            'which can exaggerate between-condition differences. Consider computing exclusion criteria '
+            'Group-estimated filtering: The current Rows × Columns settings define '
+            f'{combination_count} observed data cells ({grouping_label}). '
+            'SD, MAD, Shifting Z, or Pooling CDF criteria are estimated within the configured groups. '
+            'If these groups separate experimental conditions, this can exaggerate between-condition differences. '
+            'Consider computing exclusion criteria '
             'blind to the experimental condition (for example, within participant but collapsed across '
             f'conditions). Reference: {CONDITION_WISE_FILTER_REFERENCE}',
             4,
@@ -228,45 +230,9 @@ class StatisticTool:
 
     @staticmethod
     def singleShiftZs(count):
-        if count >= 100:
-            z_score = 2.5
-        elif 50 <= count < 100:
-            z_score = ((count - 50) * ((2.50 - 2.48) / 50)) + 2.48
-        elif 35 <= count < 50:
-            z_score = ((count - 35) * ((2.48 - 2.45) / 15)) + 2.45
-        elif 30 <= count < 35:
-            z_score = ((count - 30) * ((2.45 - 2.431) / 5)) + 2.431
-        elif 25 <= count < 30:
-            z_score = ((count - 25) * ((2.431 - 2.41) / 5)) + 2.41
-        elif 20 <= count < 25:
-            z_score = ((count - 20) * ((2.41 - 2.391) / 5)) + 2.391
-        elif 15 <= count < 20:
-            z_score = ((count - 15) * ((2.391 - 2.326) / 5)) + 2.326
-        elif count == 14:
-            z_score = 2.31
-        elif count == 13:
-            z_score = 2.274
-        elif count == 12:
-            z_score = 2.246
-        elif count == 11:
-            z_score = 2.22
-        elif count == 10:
-            z_score = 2.173
-        elif count == 9:
-            z_score = 2.12
-        elif count == 8:
-            z_score = 2.05
-        elif count == 7:
-            z_score = 1.961
-        elif count == 6:
-            z_score = 1.841
-        elif count == 5:
-            z_score = 1.68
-        elif count == 4:
-            z_score = 1.458
-        else:
-            z_score = 1
-        return z_score
+        """Delegate to the shared, replayable sample-size coefficient table."""
+        from app.dataPreparation import shifting_z_coefficient
+        return shifting_z_coefficient(count)
 
     # 转换规则
 
@@ -320,24 +286,29 @@ class StatisticTool:
             elif 'Pooling CDF' == conditional_expression:
                 omega_value = -1
                 try:
-                    tmp_data_frame = CDF_pooling_main(tmp_data_frame, row_var_list, column_var_list, variable_name)
+                    candidate_frame = CDF_pooling_main(
+                        tmp_data_frame.copy(), row_var_list, column_var_list, variable_name)
                 except (InterruptedError, FitCancelled):
                     raise
                 except Exception as e:
                     report(f"Failed to fit the data. The 'Pooling CDF' filter will be skipped. detailed Error: {e}", 4)
                 else:
                     check()
-                    po_hat, omega_value = fit_outlier_model(tmp_data_frame[f"{variable_name}_cdf"])
+                    po_hat, estimated_omega = fit_outlier_model(candidate_frame[f"{variable_name}_cdf"])
                     check()
 
-                    if omega_value:
+                    if estimated_omega is not None:
+                        estimated_omega = validate_cdf_cutoff(estimated_omega)
                         if cdf_decider is None:
-                            cdfPoolingDialog = CdfPoolingWidget(tmp_data_frame[f"{variable_name}_cdf"], po_hat, omega_value)
+                            cdfPoolingDialog = CdfPoolingWidget(
+                                candidate_frame[f"{variable_name}_cdf"], po_hat, estimated_omega)
                             cdfPoolingDialog.exec_()
                             omega_value = cdfPoolingDialog.omega_hat
                         else:
-                            omega_value = cdf_decider(tmp_data_frame[f"{variable_name}_cdf"], po_hat, omega_value)
+                            omega_value = cdf_decider(
+                                candidate_frame[f"{variable_name}_cdf"], po_hat, estimated_omega)
                         check()
+                        omega_value = validate_cdf_cutoff(omega_value, allow_abort=True)
 
                         if omega_value == -1:
                             report(
@@ -345,7 +316,7 @@ class StatisticTool:
                                 f"and no changes will be made to the data.", 4)
                         else:
                             # Retain the non-tail region; values above omega are candidates for slow outliers.
-                            filtered_df = tmp_data_frame[tmp_data_frame[f"{variable_name}_cdf"] <= omega_value]
+                            filtered_df = candidate_frame[candidate_frame[f"{variable_name}_cdf"] <= omega_value]
                             tmp_data_frame = filtered_df
                     else:
                         report(

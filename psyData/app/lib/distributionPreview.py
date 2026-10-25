@@ -16,7 +16,7 @@ class DistributionPreviewDialog(QDialog):
     EXCLUDED_COLOR = '#D95319'
     BEFORE_COLOR = '#7F7F7F'
     def __init__(self, data, retained_mask, target_variables, row_facets=None,
-                 column_facets=None, parent=None, prepared_data=False):
+                 column_facets=None, parent=None, prepared_data=False, facet_caption=None):
         """Initialize the interactive distribution preview.
 
         :param data: Original unfiltered data frame.
@@ -26,6 +26,7 @@ class DistributionPreviewDialog(QDialog):
         :param column_facets: Variables configured in the Summary Columns area.
         :param parent: Optional parent widget.
         :param prepared_data: Use an owned compact snapshot already converted by the preparation worker.
+        :param facet_caption: Optional independent-product label for descriptive grouping.
         :return: None.
         """
         super().__init__(parent)
@@ -66,7 +67,8 @@ class DistributionPreviewDialog(QDialog):
         self.group_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.group_list.setMinimumWidth(300)
         self.group_list.setToolTip(
-            'Select one Rows × Columns combination. Counts use finite observations for the selected variable.')
+            ('Select one descriptive group. Counts use finite observations for the selected variable.' if facet_caption else
+             'Select one Rows × Columns combination. Counts use finite observations for the selected variable.'))
         self.selected_group_label = QLabel()
         self.selected_group_label.setWordWrap(True)
         self.info_label = QLabel(
@@ -92,7 +94,7 @@ class DistributionPreviewDialog(QDialog):
         group_panel = QWidget()
         group_layout = QVBoxLayout(group_panel)
         group_layout.setContentsMargins(0, 0, 0, 0)
-        group_layout.addWidget(QLabel('Data × Rows × Columns combinations:'))
+        group_layout.addWidget(QLabel(facet_caption or 'Data × Rows × Columns combinations:'))
         group_layout.addWidget(self.group_list, 1)
 
         plot_panel = QWidget()

@@ -1,46 +1,12 @@
 import numpy as np
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
-from scipy.optimize import minimize
 import matplotlib.pyplot as plt
-from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout, QPushButton, QDialog, QTextEdit, QFrame
+from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout, QPushButton, QDialog, QTextEdit, QFrame, QApplication, QMessageBox
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
 from app.psyDataFunc import PsyDataFunc as Func
-
-
-def outlier_mode_lnlike(params, cdf_values):
-    po, omega = params
-
-    if not (0 <= po <= 1 and 0 <= omega < 1):
-        return np.inf
-
-    valid_density = (1 - po)
-
-    outlier_density = np.zeros_like(cdf_values)
-    mask = cdf_values >= omega
-    outlier_range = 1 - omega
-    if outlier_range == 0:
-        return np.inf
-
-    outlier_density[mask] = 2 * (cdf_values[mask] - omega) / (outlier_range ** 2)
-
-    mixture_density = valid_density + po * outlier_density
-    mixture_density = np.maximum(mixture_density, 1e-12)
-
-    return -np.sum(np.log(mixture_density))
-
-
-def fit_outlier_model(cdf_values):
-    init_params = [0.01, 0.98]
-    bounds = [(0.0001, 0.2), (0.7, 0.999)]
-
-    result = minimize(outlier_mode_lnlike, np.array(init_params), args=(cdf_values,), bounds=bounds)
-    if result.success:
-        return result.x
-    else:
-        return [None, None]
-        # raise RuntimeError("Model fitting failed")
+from app.poolingCDF import fit_outlier_model, outlier_mode_lnlike, validate_cdf_cutoff
 
 
 def generate_simulated_cdf_data(n=5000, true_po=0.03, omega=0.98):
@@ -59,6 +25,7 @@ class CdfPoolingWidget(QDialog):
         self.po_hat = po_hat
         self.omega_hat = omega_hat
         self.original_omega = omega_hat
+        self.cutoff_confirmed = False
         self.setWindowTitle('CDF Pooling Model Fit')
         self.setWindowIcon(Func.getImageObject("icon.png", type=1))
         self.setWindowModality(Qt.ApplicationModal)
@@ -70,18 +37,19 @@ class CdfPoolingWidget(QDialog):
         self.warning_Info.setTextInteractionFlags(Qt.NoTextInteraction)
         self.warning_Info.setFrameShape(QFrame.NoFrame)
         self.warning_Info.setObjectName("Warning Info")
-        self.warning_Info.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.warning_Info.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.warning_Info.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         # self.warning_Info.setFixedHeight(60)
         font = QFont("Arial", 12, QFont.Normal)
         self.warning_Info.setFont(font)
         self.warning_Info.setStyleSheet("QTextEdit { background: transparent; border: none; }")
 
-        self.warning_Info.setHtml("<div style='text-align: center;'><p style='line-height: 1.5;'>Carefully examine "
-                                  "the value of ω. If it seems unreasonable or the dataset contains fewer<br>than "
-                                  "5000 points, select \"Abort CDF Pooling\" to skip this step.</p></div>")
+        self.warning_Info.setHtml("<div style='text-align: center;'><p style='line-height: 1.5;'>"
+                                  "Inspect the fitted mixture and cutoff. Small or heterogeneous samples may be unreliable.<br>"
+                                  "At least 50 eligible trials per group are required, but this does not guarantee a valid fit. "
+                                  "Choose \"Abort CDF Pooling\" if unsuitable.</p></div>")
 
-        content_height = self.warning_Info.fontMetrics().height() * 2
+        content_height = self.warning_Info.fontMetrics().height() * 6
         self.warning_Info.setFixedHeight(int(content_height * 1.5))
 
         self.abort_button = QPushButton('Abort CDF Pooling')
@@ -113,7 +81,13 @@ class CdfPoolingWidget(QDialog):
         self.canvas.plot(self.canvas.cdf_data, self.canvas.po_hat, self.original_omega)
 
     def accept_omega(self):
-        self.omega_hat = self.canvas.omega_hat
+        try:
+            cutoff = validate_cdf_cutoff(self.canvas.omega_hat)
+        except ValueError as error:
+            QMessageBox.warning(self, 'Invalid CDF cutoff', str(error))
+            return
+        self.omega_hat = cutoff
+        self.cutoff_confirmed = True
         self.close()
         # print(f"Accepted omega: {accepted_omega:.4f}")
 
@@ -163,7 +137,11 @@ class MplCanvas(FigureCanvas):
 
     def onclick(self, event):
         if event.inaxes == self.ax:
-            self.omega_hat = event.xdata
+            try:
+                cutoff = validate_cdf_cutoff(event.xdata)
+            except ValueError:
+                return
+            self.omega_hat = cutoff
             self.plot(self.cdf_data, self.po_hat, self.omega_hat)
 
     def on_mouse_move(self, event):

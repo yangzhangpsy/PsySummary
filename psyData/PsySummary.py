@@ -32,7 +32,7 @@ from scipy.io import matlab
 from PyQt5.QtCore import QEvent, QSettings, QTimer, Qt
 from PyQt5.QtWidgets import QApplication, QFileDialog, \
     QHBoxLayout, QGridLayout, QLabel, QVBoxLayout, QPushButton, QMenu, QWidget, QMainWindow, QMessageBox, QAction, \
-    QActionGroup, QDockWidget, QStyle, QToolButton
+    QActionGroup, QDockWidget, QStyle, QToolButton, QListWidgetItem
 from PyQt5.QtGui import QKeySequence, QPainter, QPalette
 from app.psyDataFunc import PsyDataFunc as Func
 from app.info import Info
@@ -181,6 +181,7 @@ class PsyData(QMainWindow):
         self.plugin_mode = False
         self.readMatThreads = dict()
         self._mat_import_results = {}
+        self._mat_import_errors = []
         self._psydata_import_worker = None
         self._mat_import_job_id = 0
         self._mat_import_append = False
@@ -194,6 +195,7 @@ class PsyData(QMainWindow):
         self._results_transition = False
         self._results_window_resizing = False
         self._closing = False
+        self._application_shutting_down = False
         self.filterWindow = None
         self.distributionPreviewWindow = None
         self.tableFrame = None
@@ -523,12 +525,13 @@ drag the variable back to the variable list.
         if not files:
             return
         try:
-            self.files = files
             _, file_extension = os.path.splitext(files[0])
             file_extension = file_extension.lower()
 
             if file_extension in {'.txt', '.dat', '.csv'}:
-                self.import_file = DecodingFiles(files, add_source_file=True, parent=self)
+                self.import_file = DecodingFiles(
+                    files, add_source_file=True, parent=self,
+                    final_error_handler=lambda error: self._reportDataImportError(error, self.import_file))
                 self.import_file.ok_btn.clicked.connect(self.decodingFileOKPressedEvent)
                 self.import_file.finalDataReady.connect(self.decodingFileDataReady)
                 self.import_file.show()
@@ -539,12 +542,75 @@ drag the variable back to the variable list.
                 self._psydata_import_worker = worker
                 worker.finished.connect(self._finishPsyDataImport)
                 self.printLogInfo('Reading data files in the background…', 0)
-                worker.start()
+                try:
+                    worker.start()
+                except Exception:
+                    self._psydata_import_worker = None
+                    worker.deleteLater()
+                    raise
             else:
                 raise ValueError(f"Unsupported data file type: {file_extension or 'no extension'}")
         except Exception as e:
-            msg_box = FlashMessageBox('Flash Message', str(e))
-            msg_box.show()
+            self._reportDataImportError(e)
+
+    def _reportDataImportError(self, error, parent=None):
+        """Explain an unapplied import without implying that the old source was replaced."""
+        if self._application_shutting_down:
+            return
+        state = ('Previously loaded data remain active.' if self.data is not None and not self.data.empty
+                 else 'No new data were applied.')
+        message = f'Data import failed. {state}\n{error}'
+        self.printLogInfo(message, 2)
+        MessageBox.warning(parent or self, 'Data Import Error', message)
+
+    def _applyImportedData(self, data, files, script_lines):
+        """Publish any supported import, restoring source/settings if GUI publication fails."""
+        if self._application_shutting_down:
+            return False
+        if self._closing:
+            self._reportDataImportError('The window is closing; the new data were not applied.')
+            return False
+        if not isinstance(data, pd.DataFrame) or data.empty:
+            self._reportDataImportError('The selected files contain no usable data rows.')
+            return False
+        previous_data = self.data
+        previous_names = self.variablesNameList
+        previous_script = self.script_dock.text_edit.toPlainText()
+        widgets = (self.variables_list, self.rows_list, self.columns_list, self.data_list, self.filter_list)
+        snapshots = [(widget, [QListWidgetItem(widget.item(i)) for i in range(widget.count())],
+                      list(widget.contentList) if hasattr(widget, 'contentList') else None)
+                     for widget in widgets]
+        try:
+            PsyDataFunc.genScript(script_lines)
+            self.data = data
+            self.clearAllListAndSetData()
+        except Exception as error:
+            self.data = previous_data
+            self.variablesNameList = previous_names
+            self.script_dock.text_edit.setPlainText(previous_script)
+            for widget, items, contents in snapshots:
+                widget.clear()
+                for item in items:
+                    widget.addItem(item)
+                if contents is not None:
+                    widget.contentList = contents
+            self.data_list.setModelContext(previous_data, request_filtered_data=self._prepareModelSettings)
+            self._reportDataImportError(error)
+            return False
+        self.files = list(files)
+        # A previously opened filter/preview owns the old source snapshot.
+        if self.filterWindow is not None:
+            self.filterWindow.close()
+        if self.distributionPreviewWindow is not None:
+            self.distributionPreviewWindow.close()
+        try:
+            self.updateRecentFiles(files)
+        except Exception as error:
+            self.printLogInfo(f'Data were applied, but recent-file history could not be updated: {error}', 4)
+        self.printLogInfo(
+            f'Data import finished. {len(self.data)} rows, {len(self.data.columns)} variables; '
+            f'{len(files)} file(s) loaded.', 1)
+        return True
 
     def updateRecentFiles(self, file_paths):
         """Add successfully opened data files to PsySummary's recent-file history."""
@@ -635,53 +701,64 @@ drag the variable back to the variable list.
         """Start an owned, uniquely identified import job in the current batch."""
         if not self.readMatThreads:
             self._mat_import_results = {}
+            self._mat_import_errors = []
             self._mat_import_append = appendDataModel
         self._mat_import_job_id += 1
         worker = ImportMatThread(fileList, matType, appendDataModel, self)
         worker.job_id = self._mat_import_job_id
         self.readMatThreads[worker.job_id] = worker
         worker.readStatus.connect(self.handleThreadSignal)
-        worker.dataReady.connect(self.handleReadDataFinished)
         worker.finished.connect(self._finishMatImport)
-        worker.start()
-
-    def handleReadDataFinished(self, data: pd.DataFrame, fileType: int, fileList: list, appendDataModel: bool):
-        """Stage successful data; native thread completion owns cleanup and commit."""
-        worker = self.sender()
-        if worker is not None and data.size > 0:
-            self._mat_import_results[worker.job_id] = (data, fileType, list(fileList))
+        try:
+            worker.start()
+        except Exception:
+            self.readMatThreads.pop(worker.job_id, None)
+            worker.deleteLater()
+            raise
 
     def _finishMatImport(self):
-        """Release every completed job, including failures, and commit a finished batch."""
+        """Consume owned results at native completion and explicitly report publication."""
         worker = self.sender()
-        if worker is None:
+        if worker is None or self.readMatThreads.get(worker.job_id) is not worker:
             return
+        if worker.error:
+            self._mat_import_errors.append(worker.error)
+        elif worker.cancelled:
+            self._mat_import_errors.append('MAT data import was cancelled.')
+        elif worker.data is not None and not worker.data.empty:
+            self._mat_import_results[worker.job_id] = (
+                worker.data, worker.type, list(worker.loaded_files))
+        else:
+            self._mat_import_errors.append('The MAT reader returned no data.')
+        worker.data = None
         self.readMatThreads.pop(worker.job_id, None)
         worker.deleteLater()
         if self.readMatThreads:
             return
         results = [self._mat_import_results[key] for key in sorted(self._mat_import_results)]
+        errors = self._mat_import_errors
         self._mat_import_results = {}
-        if not results or self._closing:
+        self._mat_import_errors = []
+        if self._application_shutting_down:
             return
-        previous_data = self.data
-        previous_script = self.script_dock.text_edit.toPlainText()
+        if self._closing or not results:
+            detail = ('The window is closing.' if self._closing else
+                      '\n'.join(dict.fromkeys(errors)) or 'The MAT reader returned no data.')
+            self._reportDataImportError(detail)
+            return
         try:
             frames = ([self.data] if self._mat_import_append else []) + [row[0] for row in results]
             combined = pd.concat(frames, ignore_index=True)
             # Record the same stable order used for the GUI, not thread finish order.
+            script_lines = []
             for index, (_data, file_type, files) in enumerate(results):
-                PsyDataFunc.genScript(PsyDataFunc.list2Script(files, 'fileList'))
+                script_lines.append(PsyDataFunc.list2Script(files, 'fileList'))
                 method = 'readMatlabFiles' if file_type == 1 else 'readMatlabFiles73'
                 append = self._mat_import_append or index > 0
-                PsyDataFunc.genScript(f"aggData.{method}(fileList, {append})")
-            self.data = combined
-            self.clearAllListAndSetData()
-            self.updateRecentFiles([path for row in results for path in row[2]])
+                script_lines.append(f"aggData.{method}(fileList, {append})")
+            self._applyImportedData(combined, [path for row in results for path in row[2]], script_lines)
         except Exception as error:
-            self.data = previous_data
-            self.script_dock.text_edit.setPlainText(previous_script)
-            self.printLogInfo(f'MAT import failed: {error}', 2)
+            self._reportDataImportError(error)
 
     def _finishPsyDataImport(self):
         """Commit a complete file batch on the GUI thread, leaving old data on failure."""
@@ -689,27 +766,18 @@ drag the variable back to the variable list.
         if worker is not self._psydata_import_worker:
             return
         try:
-            if self._closing or worker.cancelled:
+            if self._application_shutting_down:
+                return
+            if worker.cancelled:
+                self._reportDataImportError('Data import was cancelled before the new data were applied.')
                 return
             if worker.error:
-                self.printLogInfo(f'Data import failed: {worker.error}', 2)
-                MessageBox.warning(self, 'Data Import Error', worker.error)
+                self._reportDataImportError(worker.error)
                 return
-            previous_data = self.data
-            previous_script = self.script_dock.text_edit.toPlainText()
-            try:
-                PsyDataFunc.genScript(PsyDataFunc.list2Script(worker.files, 'fileList'))
-                PsyDataFunc.genScript('aggData.readPsyDataFiles(fileList)')
-                self.data = worker.data
-                self.clearAllListAndSetData()
-                self.updateRecentFiles(worker.files)
-                for path in worker.files:
-                    self.printLogInfo(f'Reading file: {path}', 0)
-                self.printLogInfo('Data import finished.', 1)
-            except Exception as error:
-                self.data = previous_data
-                self.script_dock.text_edit.setPlainText(previous_script)
-                self.printLogInfo(f'Data import failed: {error}', 2)
+            for path in worker.files:
+                self.printLogInfo(f'Reading file: {path}', 0)
+            self._applyImportedData(worker.data, worker.files, [
+                PsyDataFunc.list2Script(worker.files, 'fileList'), 'aggData.readPsyDataFiles(fileList)'])
         finally:
             worker.data = None
             self._psydata_import_worker = None
@@ -725,6 +793,7 @@ drag the variable back to the variable list.
 
     def _shutdownDataImports(self):
         """Wait for owned import threads only during final application shutdown."""
+        self._application_shutting_down = True
         self._closing = True
         workers = list(self.readMatThreads.values())
         if self._psydata_import_worker is not None:
@@ -744,18 +813,17 @@ drag the variable back to the variable list.
 
     def decodingFileDataReady(self, data):
         """Apply imported data after background file reading."""
-        self.data = data
-        for file_path in self.import_file.files:
-            self.printLogInfo(f"Reading file: {file_path}", 0)
-        self.updateRecentFiles(self.import_file.files)
-        self.import_file.acceptEvent()
-
-        text_format, delimiter = self.import_file.getFormatAndDelimiter()
-        PsyDataFunc.genScript(PsyDataFunc.list2Script(self.import_file.files, 'fileList'))
-        PsyDataFunc.genScript(
-            f"aggData.readDatFiles(fileList, {self.import_file.getContainHeadStatus()}, "
-            f"{text_format!r}, {delimiter!r})")
-        self.clearAllListAndSetData()
+        try:
+            text_format, delimiter = self.import_file.getFormatAndDelimiter()
+            lines = [PsyDataFunc.list2Script(self.import_file.files, 'fileList'),
+                     f"aggData.readDatFiles(fileList, {self.import_file.getContainHeadStatus()}, "
+                     f"{text_format!r}, {delimiter!r})"]
+            for path in self.import_file.files:
+                self.printLogInfo(f'Reading file: {path}', 0)
+            if self._applyImportedData(data, self.import_file.files, lines):
+                self.import_file.acceptEvent()
+        except Exception as error:
+            self._reportDataImportError(error, self.import_file)
 
     def clearAllListAndSetData(self):
         if self.data is None:
@@ -1217,6 +1285,7 @@ drag the variable back to the variable list.
 
     def _shutdownPreparation(self):
         """Cancel a pending CDF decision and join only during final application shutdown."""
+        self._application_shutting_down = True
         self._closing = True
         worker = self._preparation_thread
         if worker is not None:
@@ -1476,6 +1545,12 @@ drag the variable back to the variable list.
         expanded = self._hasAggregationResults() and not self.results_dock.isHidden()
         self._resizeWindowForAggregationResults(expanded)
         self._syncAggregationResultsControls()
+
+    def showEvent(self, event):
+        """Resume a reusable window without reviving callbacks during application shutdown."""
+        if not self._application_shutting_down:
+            self._closing = False
+        super().showEvent(event)
 
     def closeEvent(self, event):
         if self._resultArchiveBusy('closing PsySummary'):
@@ -1870,6 +1945,7 @@ drag the variable back to the variable list.
 
     def _shutdownResultArchive(self):
         """Cancel and join archive I/O only during final application shutdown."""
+        self._application_shutting_down = True
         self._closing = True
         if self._result_archive_thread is not None:
             self._result_archive_thread.requestInterruption()
@@ -1956,6 +2032,7 @@ drag the variable back to the variable list.
 
     def _shutdownDataExport(self):
         """Cancel and join the writer only during final application shutdown."""
+        self._application_shutting_down = True
         self._closing = True
         worker = self._data_export_thread
         if worker is not None:

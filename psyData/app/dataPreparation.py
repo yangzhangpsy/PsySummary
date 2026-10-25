@@ -4,6 +4,7 @@ import ast
 import csv
 import json
 import os
+import re
 import tempfile
 
 import numpy as np
@@ -11,6 +12,28 @@ import pandas as pd
 
 
 PSYDATA_SCHEMA_PREFIX = '# PsySummary typed data v1 '
+
+
+def read_delimited_file(path, contains_header=True, encoding='utf-8', delimiter=r'\s', num_rows=None):
+    """Read delimited data identically in GUI previews, full imports, and script replay."""
+    frame = pd.read_csv(path, sep=delimiter, encoding=encoding, nrows=num_rows,
+                        header=0 if contains_header else None, engine='python')
+    if not contains_header:
+        frame.columns = [f'Column{i + 1}' for i in range(frame.shape[1])]
+    return frame
+
+
+def has_estimated_filter(rule_list):
+    """Identify group-estimated criteria without classifying literal checklist values as methods."""
+    for rule in rule_list:
+        _variable, expression = split_filter_rule(rule)
+        if expression == 'Pooling CDF':
+            return True
+        if is_range_expression(expression) and any(
+                re.search(pattern, expression) for pattern in
+                (r'\bSD\b', r'\bMAD\b', r'\bShifting Z\b')):
+            return True
+    return False
 
 
 def _psydata_scalar(value):
@@ -176,6 +199,51 @@ def grouped_filter_estimates(frame, group_variables, variable, mad=False, count_
         scale = grouped.transform('std', ddof=1)
     count = grouped.transform('count').to_numpy() if count_needed else None
     return center.to_numpy().reshape(-1, 1), scale.to_numpy().reshape(-1, 1), count
+
+
+def shifting_z_coefficient(count):
+    """Return PsySummary's existing sample-size-dependent Shifting Z coefficient."""
+    if count >= 100:
+        return 2.5
+    for lower, upper, start, end in ((50, 100, 2.48, 2.50), (35, 50, 2.45, 2.48),
+                                    (30, 35, 2.431, 2.45), (25, 30, 2.41, 2.431),
+                                    (20, 25, 2.391, 2.41), (15, 20, 2.326, 2.391)):
+        if lower <= count < upper:
+            return ((count - lower) * ((end - start) / (upper - lower))) + start
+    return {14: 2.31, 13: 2.274, 12: 2.246, 11: 2.22, 10: 2.173, 9: 2.12,
+            8: 2.05, 7: 1.961, 6: 1.841, 5: 1.68, 4: 1.458}.get(count, 1.)
+
+
+def numeric_filter_mask(frame, variable, operator, method='Raw value', value=0., groups=(), shifting_z=None):
+    """Compare raw or group-estimated boundaries with shared PsySummary semantics."""
+    from operator import lt, le, gt, ge
+    operations = {'<': lt, '<=': le, '>': gt, '>=': ge}
+    if operator not in operations or method not in ('Raw value', 'SDs', 'MAD', 'Shifting Z'):
+        raise ValueError('Unsupported numeric filter comparison.')
+    values = frame[variable]
+    if method == 'Raw value':
+        cutoff = value
+    else:
+        mad = method == 'MAD'
+        shifting = method == 'Shifting Z'
+        if groups:
+            center, scale, counts = grouped_filter_estimates(frame, list(groups), variable, mad, shifting)
+            center, scale = center.ravel(), scale.ravel()
+        else:
+            center = values.median(skipna=True) if mad else values.mean(skipna=True)
+            scale = 1.4826 * (values - center).abs().median(skipna=True) if mad else values.std(skipna=True, ddof=1)
+            counts = values.count() if shifting else None
+        multiplier = value
+        if shifting:
+            shifting_z = shifting_z or shifting_z_coefficient
+            if groups:
+                coefficients = {count: shifting_z(count) for count in pd.unique(counts) if pd.notna(count)}
+                multiplier = pd.Series(counts).map(coefficients).to_numpy()
+            else:
+                multiplier = shifting_z(counts)
+        cutoff = center - multiplier * scale if operator in ('>', '>=') else center + multiplier * scale
+    result = operations[operator](values.reset_index(drop=True), cutoff)
+    return result.fillna(False).to_numpy(dtype=bool)
 
 
 def prepare_summary_frame(frame, variable, operation):

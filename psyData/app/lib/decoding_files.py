@@ -9,24 +9,12 @@ from PyQt5.QtWidgets import QTableWidgetItem, QMessageBox, QComboBox, QTableWidg
 from app.psyDataFunc import PsyDataFunc as Func
 from app.lib import MessageBox, Dialog, VarComboBox
 from app.lib.source_file import addSourceFileColumn
+from app.dataPreparation import read_delimited_file
 
 
 def readDelimitedFile(file_path, encoding_code, delimiter, contains_header, num_rows=None):
     """Read one delimited file without accessing GUI state."""
-    header_line = 0 if contains_header else None
-    data = pd.read_csv(
-        file_path,
-        sep=delimiter,
-        encoding=encoding_code,
-        nrows=num_rows,
-        header=header_line,
-        engine="python",
-    )
-
-    if not contains_header:
-        data.columns = [f"Column{i + 1}" for i in range(data.shape[1])]
-
-    return data
+    return read_delimited_file(file_path, contains_header, encoding_code, delimiter, num_rows)
 
 
 class FinalDataReadWorker(QObject):
@@ -84,7 +72,7 @@ class FinalDataReadWorker(QObject):
 class DecodingFiles(Dialog):
     finalDataReady = pyqtSignal(object)
 
-    def __init__(self, files=None, add_source_file=False, parent=None):
+    def __init__(self, files=None, add_source_file=False, parent=None, *, final_error_handler=None):
         super().__init__(parent)
         if files is None:
             files = []
@@ -97,6 +85,7 @@ class DecodingFiles(Dialog):
         self.final_read_worker = None
         self.pending_final_data = None
         self.pending_final_error = ""
+        self.final_error_handler = final_error_handler
 
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)  # 去除问号按钮
         self.setWindowModality(Qt.WindowModal)
@@ -256,6 +245,10 @@ class DecodingFiles(Dialog):
 
     def showFinalDataError(self, error):
         """Display a complete-read failure in the GUI thread."""
+        if self.final_error_handler is not None:
+            self.last_error = error
+            self.final_error_handler(error)
+            return
         self.reportReadError(error)
         msg = MessageBox(
             QMessageBox.Warning,
@@ -283,6 +276,8 @@ class DecodingFiles(Dialog):
             self.pending_final_data = None
             self.last_error = ""
             self.finalDataReady.emit(data)
+        else:
+            self.showFinalDataError('The reader finished without returning data.')
 
     def setData(self):
         if not self.files:
@@ -334,9 +329,9 @@ class DecodingFiles(Dialog):
 
         if delimiter == "WhiteSpace":
             delimiter = r"\s"
-        elif delimiter:
+        elif delimiter and (len(delimiter) != 1 or self.merge_delimiters_check.isChecked()):
             delimiter = re.escape(delimiter)
-        else:
+        elif not delimiter:
             raise ValueError("The delimiter cannot be empty.")
 
         if self.merge_delimiters_check.isChecked():

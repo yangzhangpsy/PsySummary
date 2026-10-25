@@ -139,7 +139,7 @@ Note on selection: The shifting z-score method is particularly recommended for d
 Step 2.3.3 Filtering Based on Pooling Cumulative Distribution Function (CDF)
 11.	From Variable Names, select the RT variable (e.g., “target_1.rt”)
 12.	Click the Pooling CDF option 
-Note on requirements: The pooling CDF method identifies outliers by constructing the pooled cumulative distribution function (Miller, 2024). This method requires at least 50 data points per condition/cell to ensure reliable CDF estimation.
+Note on requirements: Pooling CDF fits a mixture to pooled cumulative distributions (Miller, 2024). The implementation requires at least 50 eligible trials per group; this numerical safeguard does not guarantee a reliable fit. Inspect the fitted mixture and justify the cutoff.
 13.	Click OK to confirm your filter configuration.
 Note on filter ordering and logic: PsySummary applies filters sequentially in top-down order:
 –	Ensure logical ordering (typically remove error trials first, then address RT outliers)
@@ -164,10 +164,10 @@ After configuring your analysis and outlier exclusion procedures:
 
 At this point, you need to make an informed decision about how to proceed:
 -	Option 1: Skip CDF pooling entirely. If the visualization suggests the method isn’t appropriate for your data (e.g., due to multimodality or insufficient sample size). Click Abort CDF Pooling to return to the main interface without applying this method.
--	Option 2: Fine-tune the outlier detection sensitivity. The parameter ω (omega) controls the threshold for identifying outliers. To adjust this parameter, click directly on different points of the plot to see how different ω values affect the fitted mixture density curve. Watch how the highlighted outlier regions change with different values: a smaller ω value will be more conservative (fewer outliers identified); a larger ω value will be more liberal (more outliers identified). If you’re uncertain about the optimal value, click Estimated ω to use the statistically derived optimal value based on your data characteristics.
+-	Option 2: Inspect the cutoff. Click the plot to adjust ω (omega), or click Estimated ω to restore the fitted estimate. Trials with CDF values above ω are excluded; values at or below ω are retained. A smaller cutoff excludes more trials. The fitted estimate is not a universally optimal exclusion rule.
 -	Option 3: Apply the optimized outlier detection. Once you’re satisfied with the ω parameter setting and the resulting outlier identification, click OK to finalize this step and apply the CDF-based outlier removal.
 
-Note: The CDF pooling method works best with datasets containing at least 75/100 observations per condition—based on our experience, it is best used with big data integrating across multiple studies. With smaller samples, the visualization may show artifactual patterns, and you might consider using the MAD or shifting z-score methods instead.
+Note: Small or heterogeneous samples may yield unreliable mixtures. Abort CDF Pooling if the fit is unsuitable; sample size alone does not establish validity.
  ![image](https://raw.githubusercontent.com/yangzhangpsy/PsySummary/main/figs/f18.png)
 3.	To use the results in other applications:
 –	Click Clipboard to copy the table to your clipboard

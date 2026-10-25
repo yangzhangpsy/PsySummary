@@ -1572,52 +1572,22 @@ def rt_distribution_cdf(distribution_name, x, parameters):
 
 
 def CDF_pooling_main(rt_df, sub_vars_list, cond_vars_list, rt_var_name,
-                     min_trials_required=50,
-                     rt_bounds=None,
-                     method="BFGS"):
-    """
-    Main function for CDF pooling analysis using multi-column composite grouping,
-    without modifying original DataFrame columns.
-
-    Parameters:
-    - rt_df: DataFrame with RT data.
-    - sub_vars_list: List of column names that define subject identity.
-    - cond_vars_list: List of column names that define condition identity.
-    - rt_var_name: Name of the RT column.
-    - min_trials_required: Minimum number of trials required for estimation.
-    - rt_bounds: Optional bounds on RT.
-    - method: Optimization method.
-    """
-
-    # if start_prop_var_in_tau is None:
-    #     start_prop_var_in_tau = [0.1, 0.3, 0.5, 0.7]
-
-    rt_cdf_var_name = f"{rt_var_name}_cdf"
-
-    rt_df[rt_cdf_var_name] = np.nan
-
-    group_keys = sub_vars_list + cond_vars_list
-
-    if group_keys:
-        unique_combinations = rt_df.loc[:, group_keys].drop_duplicates()
+                     min_trials_required=50, rt_bounds=None, method="BFGS"):
+    """Delegate pooling to the canonical Qt-free implementation; retain the legacy output column."""
+    if __package__:
+        from app.poolingCDF import pooled_cdf_values
     else:
-        unique_combinations = pd.DataFrame({'no_var': [1]})
-
-    for _, combo in unique_combinations.iterrows():
-        # 构建行筛选条件
-        condition = np.ones(len(rt_df), dtype=bool)
-        for col in group_keys:
-            condition &= (rt_df[col] == combo[col])
-
-        selected_rts = rt_df.loc[condition, rt_var_name].values
-
-        if len(selected_rts) < min_trials_required:
-            raise RuntimeError(f"Failed estimation for {dict(combo)}, insufficient trials: {len(selected_rts)}")
-        else:
-            est_result = ex_gaussian_estimate_x(selected_rts, 0.8, method)
-
-            mu, sigma, tau = est_result
-            rt_df.loc[condition, rt_cdf_var_name] = ex_gaussian_cdf(selected_rts, mu, sigma, tau)
+        from poolingCDF import pooled_cdf_values
+    groups = list(dict.fromkeys(sub_vars_list + cond_vars_list))
+    working = rt_df
+    if not pd.api.types.is_numeric_dtype(rt_df[rt_var_name]):
+        # Legacy text importers retain numeric strings; convert only a working column.
+        working = rt_df.loc[:, list(dict.fromkeys([rt_var_name] + groups))].copy()
+        working[rt_var_name] = pd.to_numeric(working[rt_var_name], errors='raise')
+    values, _diagnostics = pooled_cdf_values(working, rt_var_name, groups,
+                                           min_trials=min_trials_required,
+                                           check_cancelled=None)
+    rt_df[f"{rt_var_name}_cdf"] = values
     return rt_df
 
 

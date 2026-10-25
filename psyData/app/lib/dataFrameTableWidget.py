@@ -136,7 +136,10 @@ class DataFrameTableWidget(QMainWindow):
         self.variable_view.setHorizontalHeaderLabels(['Name', 'Type', 'Decimals'])
         self.variable_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.variable_view.setAlternatingRowColors(True)
-        self.variable_view.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        variable_header = self.variable_view.horizontalHeader()
+        variable_header.setSectionResizeMode(QHeaderView.Interactive)
+        variable_header.setStretchLastSection(False)
+        variable_header.setResizeContentsPrecision(-1)
         self.variable_view.cellDoubleClicked.connect(self.editVariable)
         self.tabs.addTab(self.variable_view, 'Variable View')
         self.tabs.currentChanged.connect(lambda _index: self.refreshVariables())
@@ -147,6 +150,9 @@ class DataFrameTableWidget(QMainWindow):
         container.setLayout(layout)
         self.setCentralWidget(container)
         self.refreshVariables()
+        # Size metadata once; later refreshes must preserve manually adjusted widths.
+        self.variable_view.resizeColumnsToContents()
+        self.variable_view.setColumnWidth(0, self.variable_view.columnWidth(0) + 12)
 
     def refreshVariables(self):
         """Update lightweight column metadata, never copy the data table."""

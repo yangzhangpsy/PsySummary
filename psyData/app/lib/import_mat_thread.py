@@ -77,6 +77,9 @@ class ImportMatThread(QThread):
         self.type = fileType
         self.append_data_model = appendDataModel
         self.loaded_files = []
+        self.data = None
+        self.error = ''
+        self.cancelled = False
 
     # def __del__(self):
     #     self.wait()
@@ -86,9 +89,13 @@ class ImportMatThread(QThread):
         self.readData()
 
     def readData(self):
-        """Deliver only successfully loaded data without shadowing thread completion."""
+        """Retain the complete result until the GUI consumes native thread completion."""
+        self.data = None
+        self.error = ''
+        self.cancelled = False
         try:
             if self.isInterruptionRequested():
+                self.cancelled = True
                 return
             if self.type == 1:
                 df = self.readMatlabFiles()
@@ -96,14 +103,21 @@ class ImportMatThread(QThread):
                 df = self.readMatlabFiles73()
 
             if self.isInterruptionRequested():
+                self.cancelled = True
                 return
             if df.size > 0:
+                self.data = df
+                # Retain the legacy notification for other consumers, but publication
+                # must use self.data after finished, not depend on this queued payload.
                 self.dataReady.emit(df, self.type, self.loaded_files, self.append_data_model)
             else:
-                self.readStatus.emit(2, 'No usable result rows were found in the selected MAT files.')
+                self.error = 'No usable result rows were found in the selected MAT files.'
+                self.readStatus.emit(2, self.error)
 
         except Exception as e:
-            self.readStatus.emit(2, f"IOError: {e}")
+            self.data = None
+            self.error = str(e)
+            self.readStatus.emit(2, f"IOError: {self.error}")
             # traceback.print_exc()
 
     def readMatlabFiles(self):

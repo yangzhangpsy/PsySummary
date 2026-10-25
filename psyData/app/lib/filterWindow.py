@@ -284,10 +284,10 @@ in the view/analysis/summary procedure.""")
                                             Click the 'Add Filter' button to include the <b>pooling CDF</b> method in the filter. 
                                             This method, proposed by Miller (2024, <i>BRM</i>), uses the pooled cumulative distribution 
                                             function to identify outliers. <br>
-                                             <br>However, this method has specific requirements, including a minimum of 50 data 
-                                             points per condition/cell to ensure reliable CDF estimation.<br> 
-                                             <br>As this is a novel method not yet undergone extensive validation, 
-                                             it should be applied cautiously.
+                                             <br>The implementation requires at least 50 eligible trials per group.
+                                             This is a numerical safeguard, not a guarantee of reliable estimation.<br>
+                                             <br>Inspect the fitted mixture and justify the cutoff. Trials with CDF values
+                                             above omega are excluded; smaller cutoffs exclude more trials.
                                            """)
         self.cdf_pooling_page_info.setPalette(cP)
 

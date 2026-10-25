@@ -2,7 +2,8 @@ import csv
 import os
 import re
 from app.dataPreparation import (
-    grouped_filter_estimates, is_range_expression, parse_checklist_values, prepare_summary_frame, safe_mode, split_filter_rule, read_psydata, write_psydata,
+    read_delimited_file, has_estimated_filter,
+    grouped_filter_estimates, numeric_filter_mask, is_range_expression, parse_checklist_values, prepare_summary_frame, safe_mode, split_filter_rule, read_psydata, write_psydata,
 )
 from app.expression import prepare_variable, evaluate_expression, to_aggregate_expression, runBoxcox
 from operator import lt, le, ge, gt
@@ -61,16 +62,17 @@ def addSourceFileColumn(
 def warnConditionWiseFiltering(row_var_list, column_var_list, data_frame, rule_list):
     """Print a warning when active filters are combined with multiple observed data cells."""
     grouping_variables = list(dict.fromkeys(list(row_var_list) + list(column_var_list)))
-    if not rule_list or not grouping_variables:
+    if not grouping_variables or not has_estimated_filter(rule_list):
         return 0
     combination_count = int(data_frame[grouping_variables].drop_duplicates().shape[0])
     if combination_count > 1:
         grouping_label = ' × '.join(grouping_variables)
         print(
-            'WARNING: Potential condition-wise filtering: The current Rows × Columns settings define '
-            f'{combination_count} observed data cells ({grouping_label}) while filters are active. '
-            'Any exclusion criterion estimated within these cells is applied separately by condition, '
-            'which can exaggerate between-condition differences. Consider computing exclusion criteria '
+            'WARNING: Group-estimated filtering: The current Rows × Columns settings define '
+            f'{combination_count} observed data cells ({grouping_label}). '
+            'SD, MAD, Shifting Z, or Pooling CDF criteria are estimated within the configured groups. '
+            'If these groups separate experimental conditions, this can exaggerate between-condition differences. '
+            'Consider computing exclusion criteria '
             'blind to the experimental condition (for example, within participant but collapsed across '
             f'conditions). Reference: {CONDITION_WISE_FILTER_REFERENCE}'
         )
@@ -170,49 +172,12 @@ def sumTable2DataFrame(row_var_list: list, column_var_list: list, sumTable, data
 
 
 def doFilterOutData(row_var_list: list, column_var_list: list, expression: str, dataFrame, columnName: str):
-    compareTypeStr = expression[:2].strip()
-    multiplier = None
-
-    if 'Shifting Z' in expression or 'SD' in expression or 'MAD' in expression:
-        # Estimate the center and scale appropriate to the selected rule.
-        if len(row_var_list) == 0 and len(column_var_list) == 0:
-            values = dataFrame[columnName]
-            if 'MAD' in expression:
-                center = values.median(skipna=True)
-                # Normal-consistent MAD (Rousseeuw & Croux, 1993; Leys et al., 2013).
-                scale = 1.4826 * (values - center).abs().median(skipna=True)
-            else:
-                center = values.mean(skipna=True)
-                scale = values.std(skipna=True, ddof=1)
-
-            if 'Shifting Z' in expression:
-                multiplier = singleShiftZs(values.count())
-            elif 'SD' in expression or 'MAD' in expression:
-                multiplier = getValueInExpression(expression)
-        else:
-            shifting = 'Shifting Z' in expression
-            center, scale, counts = grouped_filter_estimates(
-                dataFrame, row_var_list + column_var_list, columnName,
-                mad='MAD' in expression, count_needed=shifting)
-            if shifting:
-                # Evaluate the coefficient once per distinct count, not once per row.
-                coefficients = {count: singleShiftZs(count) for count in pd.unique(counts) if pd.notna(count)}
-                multiplier = pd.Series(counts).map(coefficients).to_numpy().reshape(-1, 1)
-            else:
-                multiplier = getValueInExpression(expression)
-
-        if compareTypeStr == '>' or compareTypeStr == '>=':
-            cutoff_Value = center - multiplier * scale
-        else:
-            cutoff_Value = center + multiplier * scale
-
-    else:
-        # the cutoff value type is a raw number
-        cutoff_Value = getValueInExpression(expression)
-
-    filtered_index = executeDataFilter(dataFrame, columnName, compareTypeStr, cutoff_Value)
-
-    return filtered_index
+    """Reuse the Qt-free range engine while preserving legacy expression parsing."""
+    method = ('Shifting Z' if 'Shifting Z' in expression else 'MAD' if 'MAD' in expression
+              else 'SDs' if 'SD' in expression else 'Raw value')
+    value = 0. if method == 'Shifting Z' else getValueInExpression(expression)
+    return numeric_filter_mask(dataFrame, columnName, expression[:2].strip(), method, value,
+                               row_var_list + column_var_list, singleShiftZs).reshape(-1, 1)
 
 
 def filterDataFunc(row_var_list, column_var_list, dataFrame, ruleList, omegaValues=None):
@@ -254,14 +219,15 @@ def filterDataFunc(row_var_list, column_var_list, dataFrame, ruleList, omegaValu
 
         elif 'Pooling CDF' == conditional_expression:
 
-            if 0 < omegaValues[index] < 1:
+            cutoff = validate_cdf_cutoff(omegaValues[index], allow_abort=True)
+            if cutoff != -1:
                 tmp_data_frame = CDF_pooling_main(tmp_data_frame, row_var_list, column_var_list, variable_name)
 
                 # Match the GUI: retain CDF values at or below the slow-tail cutoff.
-                filtered_df = tmp_data_frame[tmp_data_frame[f"{variable_name}_cdf"] <= omegaValues[index]]
+                filtered_df = tmp_data_frame[tmp_data_frame[f"{variable_name}_cdf"] <= cutoff]
                 tmp_data_frame = filtered_df
             else:
-                print(f"Skip 'Pool CDF' as the ω is out of the range [0, 1], and no changes will be made to the data.")
+                print("Aborted CDF pooling; no changes will be made to the data.")
         else:
             # checkList rules
             data = parse_checklist_values(conditional_expression)
@@ -271,37 +237,8 @@ def filterDataFunc(row_var_list, column_var_list, dataFrame, ruleList, omegaValu
     return tmp_data_frame
 
 
-def outlier_mode_lnlike(params, cdf_values):
-    po, omega = params
-
-    if not (0 <= po <= 1 and 0 <= omega < 1):
-        return np.inf
-
-    valid_density = (1 - po)
-
-    outlier_density = np.zeros_like(cdf_values)
-    mask = cdf_values >= omega
-    outlier_range = 1 - omega
-    if outlier_range == 0:
-        return np.inf
-
-    outlier_density[mask] = 2 * (cdf_values[mask] - omega) / (outlier_range ** 2)
-
-    mixture_density = valid_density + po * outlier_density
-    mixture_density = np.maximum(mixture_density, 1e-12)
-
-    return -np.sum(np.log(mixture_density))
-
-
-def fit_outlier_model(cdf_values):
-    init_params = [0.01, 0.98]
-    bounds = [(0.0001, 0.2), (0.7, 0.999)]
-
-    result = minimize(outlier_mode_lnlike, np.array(init_params), args=(cdf_values,), bounds=bounds)
-    if result.success:
-        return result.x
-    else:
-        return [None, None]
+# Shared cutoff likelihood and estimator; no independent GUI/replay algorithm.
+from app.poolingCDF import outlier_mode_lnlike, fit_outlier_model, validate_cdf_cutoff
 
 
 def groupby_to_pivot_tables(grouped_result, index_var=None, columns_var=None):
@@ -371,45 +308,9 @@ def groupby_to_pivot_tables(grouped_result, index_var=None, columns_var=None):
 
 
 def singleShiftZs(count):
-    if count >= 100:
-        z_score = 2.5
-    elif 50 <= count < 100:
-        z_score = ((count - 50) * ((2.50 - 2.48) / 50)) + 2.48
-    elif 35 <= count < 50:
-        z_score = ((count - 35) * ((2.48 - 2.45) / 15)) + 2.45
-    elif 30 <= count < 35:
-        z_score = ((count - 30) * ((2.45 - 2.431) / 5)) + 2.431
-    elif 25 <= count < 30:
-        z_score = ((count - 25) * ((2.431 - 2.41) / 5)) + 2.41
-    elif 20 <= count < 25:
-        z_score = ((count - 20) * ((2.41 - 2.391) / 5)) + 2.391
-    elif 15 <= count < 20:
-        z_score = ((count - 15) * ((2.391 - 2.326) / 5)) + 2.326
-    elif count == 14:
-        z_score = 2.31
-    elif count == 13:
-        z_score = 2.274
-    elif count == 12:
-        z_score = 2.246
-    elif count == 11:
-        z_score = 2.22
-    elif count == 10:
-        z_score = 2.173
-    elif count == 9:
-        z_score = 2.12
-    elif count == 8:
-        z_score = 2.05
-    elif count == 7:
-        z_score = 1.961
-    elif count == 6:
-        z_score = 1.841
-    elif count == 5:
-        z_score = 1.68
-    elif count == 4:
-        z_score = 1.458
-    else:
-        z_score = 1
-    return z_score
+    """Delegate to the shared, replayable sample-size coefficient table."""
+    from app.dataPreparation import shifting_z_coefficient
+    return shifting_z_coefficient(count)
 
 
 def flattenValue(value):
@@ -447,28 +348,8 @@ def flattenValueMat73(value):
 
 
 def readDatFile(file_path, containsHeader=True, encodingFormat='utf-8', delimiter=r'\s'):
-    df = None
-    try:
-        with open(file_path, 'r', encoding=encodingFormat) as file:
-            lines = file.readlines()
-
-            if containsHeader:
-                variable_names = re.split(delimiter, lines[0].strip())  # 第一行为变量名
-                data = [re.split(delimiter, line.strip()) for line in lines[1:]]  # 以分隔符分隔的变量值
-            else:
-                data = [re.split(delimiter, line.strip()) for line in lines]
-                variable_names = [f"Column{i + 1}" for i in range(len(data[0]))]
-
-            df = pd.DataFrame(data)
-
-            if len(variable_names) >= df.shape[1]:
-                df.columns = variable_names[:df.shape[1]]
-            else:
-                df.columns = variable_names + [f'untitled{iVar}' for iVar in range(df.shape[1] - len(variable_names))]
-            # return df
-    except Exception as e:
-        print(f"\033[31mError in reading file! File probably changed/moved.:{file_path}:{e}\033[0m")
-    return df
+    """Use the GUI parser and propagate invalid full-file imports instead of accepting partial data."""
+    return read_delimited_file(file_path, containsHeader, encodingFormat, delimiter)
 
 
 class AggregateData(object):
