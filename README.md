@@ -24,6 +24,14 @@ On Windows, extract the installer archive before launching it. Use **Extract All
 | [LICENSE](LICENSE) | MIT license |
 
 ## Tutorial
+# Reaction time outlier handling in behavioral research. Part II: PsySummary software, validation, and tutorial
+
+<p align="center"> Zhicheng Lin<sup>1,2</sup>, lian-zi Xing<sup>1</sup>, Xin Chen<sup>1</sup>, Yue-Jie Chen<sup>1</sup>, Yang Zhang<sup>1</sup> </p>
+
+<sup>1</sup> _Department of Psychology, Soochow University, Suzhou, Jiangsu, China 215000_
+<br>
+<sup>2</sup> _Department of Psychology, Yonsei University, Seoul, Republic of Korea, 03722_
+
 
 The workflow has three stages:
 
