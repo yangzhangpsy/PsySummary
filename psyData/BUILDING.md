@@ -14,6 +14,22 @@ files, then run DropDMG, Inno Setup or `dpkg-deb`. Temporary build output stays 
 No additional Python build framework, automatic package installation or `sudo`
 is involved. Real-platform installer testing remains a separate release step.
 
+Both specs use `pyinstaller_build_config.py` to exclude JAX/JAXlib, Numba/LLVMlite,
+and PyArrow, which are optional dependency backends rather than requirements of
+PsySummary's NumPy/SciPy analyses. The same policy removes test directories,
+bytecode caches, and backup resources while retaining runtime testing utilities,
+demo data, and the readable modules required for script export. Do not remove
+libraries manually from an already signed application bundle.
+
+Check this policy without building an installer:
+
+```sh
+python3 -m unittest discover -s tests -p 'test_packaging.py'
+```
+
+Run this command from the repository root. After rebuilding, verify imports, variable types,
+fitting workers, and script export in the frozen application, not only in source mode.
+
 ## Optional macOS signing
 
 Without a signing identity, the default build uses PyInstaller's ad-hoc signing.

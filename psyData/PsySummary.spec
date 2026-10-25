@@ -2,8 +2,12 @@
 # Windows and Linux use the same one-folder application layout.
 from importlib.util import find_spec
 from pathlib import Path
+import sys
 
 root = Path(SPECPATH).resolve()
+sys.path.insert(0, str(root))
+from pyinstaller_build_config import bundle_excludes, filter_bundle_analysis
+
 # Some SciPy versions no longer provide the extension requested by older hooks.
 scipy_excludes = [] if find_spec('scipy.special._cdflib') else ['scipy.special._cdflib']
 a = Analysis(
@@ -21,9 +25,10 @@ a = Analysis(
     ],
     hiddenimports=['matplotlib.backends.backend_qt5agg'],
     hookspath=[], runtime_hooks=[],
-    excludes=['PyQt6', 'PySide6', 'PySide2'] + scipy_excludes,
+    excludes=bundle_excludes() + scipy_excludes,
     noarchive=False,
 )
+filter_bundle_analysis(a)
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz, a.scripts, [], exclude_binaries=True, name='PsySummary',
