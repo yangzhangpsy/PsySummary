@@ -10,7 +10,7 @@ Choose exclusion criteria, grouping variables, and models from the study design 
 - See the [PsyBuilder website](https://www.psybuilder.com) for desktop download and installation information.
 - PsySummary can run as a standalone application or inside PsyBuilder through **Toolboxes > Results Data Aggregation**.
 
-Choose an installer matching your operating system and processor architecture. GitHub's **Code > Download ZIP** provides source code, not a prebuilt application.
+Download a prebuilt installer compatible with your operating system and processor architecture from this repository or the PsyBuilder website.
 
 On Windows, extract the installer archive before launching it. Use **Extract All**; if extraction fails, try a current version of [7-Zip](https://www.7-zip.org). On macOS, open the supplied disk image and install the application.
 
