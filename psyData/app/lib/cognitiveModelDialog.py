@@ -6,9 +6,9 @@ import numpy as np
 import pandas as pd
 from PyQt5.QtCore import QSignalBlocker, Qt
 from PyQt5.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QGridLayout, QGroupBox,
+    QComboBox, QDialog, QDialogButtonBox, QFrame, QGridLayout, QGroupBox, QLayout,
     QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
-    QVBoxLayout,
+    QScrollArea, QVBoxLayout, QWidget,
 )
 
 from app.cognitiveModelSpec import (
@@ -50,17 +50,37 @@ class CognitiveModelDialog(QDialog):
         self._updating_parameters = False
         self._mapping_widgets = []
         self.setWindowTitle(f'{model} Settings')
-        self.resize(820, 760)
         self._build_ui()
         self._load_initial_state()
         self._refresh_automatic_starts()
         self._update_mapping_presentation()
         self._update_validation()
         self.accuracy_combo.currentTextChanged.connect(self._update_validation)
+        self._size_to_available_screen()
+
+    def _size_to_available_screen(self):
+        """Bound the initial client size while reserving room for window decorations."""
+        parent = self.parentWidget()
+        screen = parent.screen() if parent is not None else self.screen()
+        if screen is None:
+            self.resize(820, 760)
+            return
+        available = screen.availableGeometry()
+        self.resize(min(820, max(1, available.width() - 32)),
+                    min(760, max(1, available.height() - 64)))
 
     def _build_ui(self):
         """Build the data, mapping, parameter, and optimizer controls."""
         root_layout = QVBoxLayout(self)
+        self.settings_scroll = QScrollArea(self)
+        self.settings_scroll.setWidgetResizable(True)
+        self.settings_scroll.setFrameShape(QFrame.NoFrame)
+        settings_widget = QWidget()
+        content_layout = QVBoxLayout(settings_widget)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        # Dynamic mapping/parameter rows resize the scrollable content, not the dialog.
+        content_layout.setSizeConstraint(QLayout.SetMinAndMaxSize)
+        self.settings_scroll.setWidget(settings_widget)
 
         data_group = QGroupBox('Data Mapping')
         data_layout = QGridLayout(data_group)
@@ -208,11 +228,13 @@ class CognitiveModelDialog(QDialog):
         self.button_box.button(QDialogButtonBox.Ok).setToolTip(
             'Save and close, including incomplete settings. Settings are checked again before running.')
 
-        root_layout.addWidget(data_group)
-        root_layout.addWidget(self.mapping_group)
-        root_layout.addWidget(parameter_group, 1)
-        root_layout.addWidget(optimizer_group)
-        root_layout.addWidget(self.validation_label)
+        content_layout.addWidget(data_group)
+        content_layout.addWidget(self.mapping_group)
+        content_layout.addWidget(parameter_group, 1)
+        content_layout.addWidget(optimizer_group)
+        content_layout.addWidget(self.validation_label)
+        root_layout.addWidget(self.settings_scroll, 1)
+        # Save/Cancel stay outside the scroll area and remain reachable on small screens.
         root_layout.addWidget(self.button_box)
 
         self.response_combo.currentTextChanged.connect(self._response_variable_changed)
