@@ -14,6 +14,11 @@ files, then run DropDMG, Inno Setup or `dpkg-deb`. Temporary build output stays 
 No additional Python build framework, automatic package installation or `sudo`
 is involved. Real-platform installer testing remains a separate release step.
 
+Both Windows scripts create `PsySummary.exe` in the repository root, then package
+that installer as `PsySummary<timestamp>Win.zip`. The EXE inside the ZIP is also
+named `PsySummary.exe`. Subsequent builds replace the fixed-name installer;
+timestamped ZIP releases retain their separate filenames.
+
 Both specs use `pyinstaller_build_config.py` to exclude JAX/JAXlib, Numba/LLVMlite,
 and PyArrow, which are optional dependency backends rather than requirements of
 PsySummary's NumPy/SciPy analyses. The same policy removes test directories,
