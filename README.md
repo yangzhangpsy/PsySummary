@@ -7,12 +7,13 @@ Choose exclusion criteria, grouping variables, and models from the study design 
 ## Software access
 
 - Source code and documentation are available in this [public repository](https://github.com/yangzhangpsy/PsySummary).
+- Prebuilt Windows installers and macOS disk images are available on the [GitHub Releases page](https://github.com/yangzhangpsy/PsySummary/releases).
 - See the [PsyBuilder website](https://www.psybuilder.com) for desktop download and installation information.
 - PsySummary can run as a standalone application or inside PsyBuilder through **Toolboxes > Results Data Aggregation**.
 
-Download a prebuilt installer compatible with your operating system and processor architecture from this repository or the PsyBuilder website.
+Open the [Releases page](https://github.com/yangzhangpsy/PsySummary/releases), expand **Assets** for the desired release, and download the installer compatible with your operating system and processor architecture. Choose the Windows `PsySummary<timestamp>Win.zip` or the appropriate macOS `.dmg`; the automatically generated **Source code** archives are not installers.
 
-On Windows, extract the installer archive before launching it. Use **Extract All**; if extraction fails, try a current version of [7-Zip](https://www.7-zip.org). On macOS, open the supplied disk image and install the application.
+On Windows, extract the ZIP archive using **Extract All**, then run `PsySummary.exe`. If extraction fails, try a current version of [7-Zip](https://www.7-zip.org). On macOS, open the downloaded disk image and install the application.
 
 ## Repository contents
 
