@@ -7,8 +7,8 @@ Choose exclusion criteria, grouping variables, and models from the study design 
 ## Software access
 
 - Source code and documentation are available in this [public repository](https://github.com/yangzhangpsy/PsySummary).
-- Prebuilt Windows installers and macOS disk images are available on the [GitHub Releases page](https://github.com/yangzhangpsy/PsySummary/releases).
-- See the [PsyBuilder website](https://www.psybuilder.com) for desktop download and installation information.
+- Download PsySummary installers for Windows and macOS from the [GitHub Releases page](https://github.com/yangzhangpsy/PsySummary/releases).
+- Alternatively, download PsySummary from the [PsyBuilder website](https://www.psybuilder.com/).
 - PsySummary can run as a standalone application or inside PsyBuilder through **Toolboxes > Results Data Aggregation**.
 
 Open the [Releases page](https://github.com/yangzhangpsy/PsySummary/releases), expand **Assets** for the desired release, and download the installer compatible with your operating system and processor architecture. Choose the Windows `PsySummary<timestamp>Win.zip` or the appropriate macOS `.dmg`; the automatically generated **Source code** archives are not installers.
@@ -398,7 +398,7 @@ Analysis calls are recorded after the selected analysis completes successfully. 
 
 The [supporting materials archive](Supporting_materials_20261025.zip) provides the tutorial inputs, saved settings, filtered data and summaries, GUI-exported scripts and matching numerical modules, five preprocessing comparisons, cognitive-model references and fitting benchmarks, and GUI import/replay comparisons. Extract the archive and follow its README to reproduce the supplied analyses. The portable replay and saved-reference checks do not require a GUI source checkout; regenerating the independent model references and fitting benchmarks requires R/rtdists.
 
-The manuscript and Supplementary Validation S1 describe the validation procedures and scope. Agreement for specified calculations does not establish a universally appropriate filter or general parameter recovery.
+The supporting materials document the validation procedures and scope. Agreement for specified calculations does not establish a universally appropriate filter or general parameter recovery.
 
 PsySummary supports descriptive summaries, selected RT distributions, and independently grouped cognitive-model fits. It does not provide hierarchical cognitive-model estimation, trial-level parameter regression, automatic model selection, or general regression-based influence diagnostics such as Cook's distance. Export retained trial-level data for analyses outside this scope.
 
