@@ -20,8 +20,10 @@ AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+; Use the legacy x64 identifier for compatibility with Inno Setup 6.2.1.
+; Target native x64 Windows and use its 64-bit Program Files and registry view.
+ArchitecturesAllowed=x64
+ArchitecturesInstallIn64BitMode=x64
 DisableProgramGroupPage=yes
 ; The [Icons] "quicklaunchicon" entry uses {userappdata} but its [Tasks] entry has a proper IsAdminInstallMode Check.
 UsedUserAreasWarning=no

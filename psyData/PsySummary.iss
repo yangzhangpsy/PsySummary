@@ -20,14 +20,10 @@ AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
-; "ArchitecturesAllowed=x64compatible" specifies that Setup cannot run
-; on anything but x64 and Windows 11 on Arm.
-ArchitecturesAllowed=x64compatible
-; "ArchitecturesInstallIn64BitMode=x64compatible" requests that the
-; install be done in "64-bit mode" on x64 or Windows 11 on Arm,
-; meaning it should use the native 64-bit Program Files directory and
-; the 64-bit view of the registry.
-ArchitecturesInstallIn64BitMode=x64compatible
+; Use the legacy x64 identifier for compatibility with Inno Setup 6.2.1.
+; Target native x64 Windows and use its 64-bit Program Files and registry view.
+ArchitecturesAllowed=x64
+ArchitecturesInstallIn64BitMode=x64
 DisableProgramGroupPage=yes
 LicenseFile={#SourcePath}\license.txt
 ; Uncomment the following line to run in non administrative install mode (install for current user only.)
