@@ -133,7 +133,6 @@ class FilterWindow(QWidget):
         self.selected_var_name = None
         self.data = dataframe
         self.mainFilterList = mainFilterList
-        self.chooseItem = None
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.resize(300, 700)
 
@@ -398,7 +397,6 @@ in the view/analysis/summary procedure.""")
         self.cdf_pooling_radio.stateChanged.connect(self.cdfPoolingRadioEvent)
 
         self.befiltered_var_box.currentIndexChanged.connect(self.changeComboBox)
-        self.filter_list.itemClicked.connect(self.onItemClicked)
         self.filter_list.listChanged.connect(self.rowChange)
 
         self.value_comboBox1.setEditable(True)
@@ -713,19 +711,16 @@ in the view/analysis/summary procedure.""")
         self.filter_list.clear()
         self.mainFilterList.clear()
 
-    def onItemClicked(self, item):
-        self.chooseItem = item
-
     # 清除选中项
     def clearOne(self):
-        if self.chooseItem is None:
+        items = self.filter_list.selectedItems()
+        if not items:
             msg = QMessageBox(QMessageBox.Warning, "Warning", "Please select a filter item to clear.")
             msg.exec_()
         else:
-            row = self.filter_list.row(self.chooseItem)
-            self.filter_list.takeItem(row)
-            self.mainFilterList.takeItem(row)
-            self.chooseItem = None
+            for row in sorted((self.filter_list.row(item) for item in items), reverse=True):
+                self.filter_list.takeItem(row)
+            self.rowChange()
 
     # 关闭窗口
     def closeWindow(self):

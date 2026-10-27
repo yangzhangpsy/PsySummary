@@ -9,6 +9,7 @@ from PyQt5 import sip
 
 from app.lib import MessageBox
 from app.lib.list_widget import ListWidget
+from app.lib.ordered_filter_list import OrderedFilterListWidget
 from app.lib.cognitiveModelDialog import edit_cognitive_model
 from app.cognitiveModelSpec import COGNITIVE_MODEL_NAMES, is_cognitive_model
 
@@ -481,52 +482,9 @@ class VariableDraggableListWidget(ListWidget):
 
 
 # for filter list
-class FilterDragListWidget(ListWidget):
-    # 自定义信号
-    # listChanged: pyqtSignal = pyqtSignal(str)
-
-    def __init__(self, contextMenuType: int = 1):
-        super().__init__(contextMenuType)
-
-        self.setAcceptDrops(True)
-        self.setDragDropMode(QListWidget.InternalMove)
-        self.setSelectionMode(QListWidget.MultiSelection)
-
-    # 判断拖动后是否完成交换位置，以便及时同步
-    def dropEvent(self, event):
-        old_row = self.currentRow()  # 保存拖动前的位置
-        super().dropEvent(event)
-        new_row = self.currentRow()  # 获取拖动后的位置
-        if old_row != new_row:
-            self.listChanged.emit("change")
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Delete:  # Delete key
-            selected_items = self.selectedItems()
-            if selected_items:
-                reply = QMessageBox.question(self, 'Delete Item', 'Are you sure to delete the selected item(s)?',
-                                             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-                if reply == QMessageBox.Yes:
-                    for item in selected_items:
-                        self.removeItem(item)
-                        # self.takeItem(self.row(item))
-
-                    self.listChanged.emit("delete")
+class FilterDragListWidget(OrderedFilterListWidget):
+    """PsySummary filter editor with shared ordered-rule interactions."""
 
 
-class MainFilterListWidget(ListWidget):
-    def __init__(self, contextMenuType: int = 1):
-        super().__init__(contextMenuType)
-        self.setDragDropMode(QListWidget.InternalMove)
-        self.setSelectionMode(QListWidget.MultiSelection)
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Delete:  # Delete key
-            selected_items = self.selectedItems()
-            if selected_items:
-                reply = QMessageBox.question(self, 'Delete Item', 'Are you sure to delete the selected item(s)?',
-                                             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-                if reply == QMessageBox.Yes:
-                    for item in selected_items:
-                        self.removeItem(item)
-                        # self.takeItem(self.row(item))
+class MainFilterListWidget(OrderedFilterListWidget):
+    """PsySummary's main Filters list uses the same selection and move behavior."""
